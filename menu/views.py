@@ -125,57 +125,27 @@ class CategoryListView(
             is_active=True
         )
         
+        
 class CategoryListCreateView(
     generics.ListCreateAPIView
 ):
-
     serializer_class = MenuCategorySerializer
-
-    permission_classes = [
-        IsAuthenticated
-    ]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        qs = MenuCategory.objects.all()
+        return qs
 
-        user = self.request.user
-
-        if user.role == "superadmin":
-            return MenuCategory.objects.all()
-
-        if user.role == "manager":
-
-            try:
-
-                shop = (
-                    user.manager_profile.shop
-                )
-
-                return MenuCategory.objects.filter(
-                    shop=shop
-                )
-
-            except:
-                return MenuCategory.objects.none()
-
-        return MenuCategory.objects.none()
-
-    def perform_create(
-        self,
-        serializer
-    ):
+    def perform_create(self, serializer):
 
         user = self.request.user
 
         if user.role == "manager":
-
             serializer.save(
                 shop=user.manager_profile.shop
             )
-
         else:
-
             serializer.save()
-            
             
     
 class CategoryDetailView(
@@ -233,7 +203,7 @@ class MenuItemListCreateView(
 
         user = self.request.user
 
-        if user.role == "superadmin":
+        if user.role == "super_admin":
             return MenuItem.objects.all()
 
         if user.role == "manager":
@@ -274,16 +244,17 @@ class MenuItemListCreateView(
 class MenuItemDetailView(
     generics.RetrieveUpdateDestroyAPIView
 ):
-
     queryset = MenuItem.objects.all()
-
     serializer_class = MenuItemSerializer
-
-    permission_classes = [
-        IsAuthenticated
-    ]
+    permission_classes = [IsAuthenticated]
 
     parser_classes = [
         MultiPartParser,
         FormParser
     ]
+
+    def perform_update(
+        self,
+        serializer
+    ):
+        serializer.save()

@@ -7,6 +7,7 @@ from .models import MenuItem
 class MenuItemSerializer(serializers.ModelSerializer):
 
     image_url = serializers.SerializerMethodField()
+    shop = serializers.ReadOnlyField(source="shop.id")
 
     class Meta:
         model = MenuItem
