@@ -12,14 +12,19 @@ class Order(models.Model):
         ("accepted", "Accepted"),
         ("rejected", "Rejected"),
         ("preparing", "Preparing"),
-        ("ready", "Ready For Pickup"),
+        ("ready", "Ready"),
         ("collected", "Collected"),
         ("cancelled", "Cancelled"),
     )
 
-    ORDER_TYPE_CHOICES = (
-        ("online", "Online"),
-        ("walkin", "Walk-In"),
+    PAYMENT_METHODS = (
+        ("cash", "Cash On Pickup"),
+        ("upi", "UPI On Shop"),
+    )
+
+    PAYMENT_STATUS = (
+        ("pending", "Pending"),
+        ("paid", "Paid"),
     )
 
     order_number = models.CharField(
@@ -39,9 +44,29 @@ class Order(models.Model):
         on_delete=models.CASCADE
     )
 
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PAYMENT_METHODS,
+        default="cash"
+    )
+
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PAYMENT_STATUS,
+        default="pending"
+    )
+
+    pickup_time = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
     order_type = models.CharField(
         max_length=20,
-        choices=ORDER_TYPE_CHOICES,
+        choices=(
+            ("online", "Online"),
+            ("walkin", "Walk-In"),
+        ),
         default="online"
     )
 
@@ -69,7 +94,7 @@ class Order(models.Model):
         default=0
     )
 
-    rejection_reason = models.TextField(
+    notes = models.TextField(
         blank=True,
         null=True
     )
@@ -77,30 +102,25 @@ class Order(models.Model):
     ordered_at = models.DateTimeField(
         auto_now_add=True
     )
+    
+    rejection_reason = models.TextField(
+        blank=True,
+        null=True
+    )
 
     accepted_at = models.DateTimeField(
-        blank=True,
-        null=True
-    )
-
-    ready_at = models.DateTimeField(
-        blank=True,
-        null=True
-    )
-
-    collected_at = models.DateTimeField(
-        blank=True,
-        null=True
-    )
-    
-    collection_time = models.DateTimeField(
         null=True,
         blank=True
     )
 
-    notes = models.TextField(
-        blank=True,
-        null=True
+    ready_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    collected_at = models.DateTimeField(
+        null=True,
+        blank=True
     )
 
     def __str__(self):

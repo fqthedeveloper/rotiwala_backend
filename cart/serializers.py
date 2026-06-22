@@ -12,15 +12,16 @@ class CartItemSerializer(serializers.ModelSerializer):
     )
 
     item_price = serializers.DecimalField(
-        source="menu_item.price",
+        source="menu_item.base_price",
         max_digits=10,
         decimal_places=2,
         read_only=True
     )
 
-    total_price = serializers.ReadOnlyField()
+    total_price = serializers.SerializerMethodField()
 
     class Meta:
+
         model = CartItem
 
         fields = [
@@ -32,6 +33,10 @@ class CartItemSerializer(serializers.ModelSerializer):
             "total_price"
         ]
 
+    def get_total_price(self, obj):
+
+        return obj.menu_item.base_price * obj.quantity
+
 
 class CartSerializer(serializers.ModelSerializer):
 
@@ -40,11 +45,25 @@ class CartSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    total_amount = serializers.SerializerMethodField()
+
     class Meta:
+
         model = Cart
 
         fields = [
             "id",
             "customer",
-            "items"
+            "items",
+            "total_amount"
         ]
+
+    def get_total_amount(self, obj):
+
+        total = 0
+
+        for item in obj.items.all():
+
+            total += item.menu_item.base_price * item.quantity
+
+        return total

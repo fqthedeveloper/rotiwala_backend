@@ -8,11 +8,10 @@ from .models import User
 from .models import CustomerProfile
 from .serializers import UserSerializer
 from .models import ManagerProfile
-from rest_framework import generics
-
-from shops.models import Shop
-
+from rest_framework import generics, status
 from .serializers import ManagerSerializer
+from django.contrib.auth import authenticate
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.permissions import (
     IsSuperAdmin
@@ -225,7 +224,6 @@ class FirebaseLoginView(APIView):
             )
             
 
-from django.contrib.auth import authenticate
 
 class PasswordLoginView(APIView):
 
@@ -233,57 +231,82 @@ class PasswordLoginView(APIView):
 
     def post(self, request):
 
-        phone = request.data.get("phone")
-        password = request.data.get("password")
+        phone = request.data.get("phone", "").strip()
+        password = request.data.get("password", "").strip()
 
-        if not phone or not password:
-
+        # Validate input
+        if not phone:
             return Response(
                 {
-                    "error": "Phone and password are required"
+                    "success": False,
+                    "field": "phone",
+                    "message": "Phone number is required."
                 },
-                status=400
+                status=status.HTTP_400_BAD_REQUEST
             )
 
+        if not password:
+            return Response(
+                {
+                    "success": False,
+                    "field": "password",
+                    "message": "Password is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check phone exists
         try:
-
-            user = User.objects.get(
-                phone=phone
-            )
+            user = User.objects.get(phone=phone)
 
         except User.DoesNotExist:
-
             return Response(
                 {
-                    "error": "Invalid credentials"
+                    "success": False,
+                    "field": "phone",
+                    "message": "This phone number is not registered."
                 },
-                status=400
+                status=status.HTTP_404_NOT_FOUND
             )
 
+        # Check account active
+        if not user.is_active:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Your account has been disabled. Please contact support."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Verify password
         auth_user = authenticate(
             username=user.username,
             password=password
         )
 
         if not auth_user:
-
             return Response(
                 {
-                    "error": "Invalid credentials"
+                    "success": False,
+                    "field": "password",
+                    "message": "Incorrect password. Please try again."
                 },
-                status=400
+                status=status.HTTP_401_UNAUTHORIZED
             )
 
-        refresh = RefreshToken.for_user(
-            auth_user
-        )
+        # Generate JWT
+        refresh = RefreshToken.for_user(auth_user)
 
         return Response(
             {
+                "success": True,
+                "message": f"Welcome back {auth_user.first_name or auth_user.username}!",
                 "refresh": str(refresh),
                 "access": str(refresh.access_token),
                 "user": UserSerializer(auth_user).data
-            }
+            },
+            status=status.HTTP_200_OK
         )
 
 class SaveFCMTokenView(APIView):

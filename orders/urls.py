@@ -53,5 +53,20 @@ urlpatterns = [
         "<int:pk>/cancel/",
         CancelOrderView.as_view()
     ),
+    
+    path(
+        "dashboard/",
+        ManagerDashboardView.as_view()
+    ),
+
+    path(
+        "<int:pk>/",
+        OrderDetailView.as_view()
+    ),
+
+    path(
+        "<int:pk>/payment/",
+        PaymentReceivedView.as_view()
+    ),
 
 ]

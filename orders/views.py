@@ -1,7 +1,8 @@
 import uuid
 
 from django.utils import timezone
-
+from django.utils.dateparse import parse_datetime
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -91,10 +92,47 @@ class PlaceOrderView(APIView):
                 status=400
             )
 
+        payment_method = request.data.get(
+            "payment_method",
+            "cash"
+        )
+
+        pickup_time = request.data.get(
+            "pickup_time"
+        )
+
+        pickup_time_obj = None
+
+        if pickup_time:
+
+            pickup_time_obj = parse_datetime(
+                pickup_time
+            )
+
+            if (
+                pickup_time_obj and
+                timezone.is_naive(
+                    pickup_time_obj
+                )
+            ):
+                pickup_time_obj = (
+                    timezone.make_aware(
+                        pickup_time_obj
+                    )
+        )
+
+        notes = request.data.get(
+            "notes",
+            ""
+        )
+
         order = Order.objects.create(
             order_number=str(uuid.uuid4())[:10],
             customer=request.user,
             shop=shop,
+            payment_method=payment_method,
+            pickup_time=pickup_time,
+            notes=notes,
             status="pending"
         )
 
@@ -103,14 +141,14 @@ class PlaceOrderView(APIView):
         for item in cart_items:
 
             line_total = (
-                item.menu_item.price *
+                item.menu_item.base_price *
                 item.quantity
             )
 
             OrderItem.objects.create(
                 order=order,
                 item_name=item.menu_item.name,
-                item_price=item.menu_item.price,
+                item_price=item.menu_item.base_price,
                 quantity=item.quantity,
                 total_price=line_total
             )
@@ -129,8 +167,7 @@ class PlaceOrderView(APIView):
 
         manager = User.objects.filter(
             role="manager",
-            managerprofile__shop=shop
-        ).first()
+            manager_profile__shop=shop ).first()
 
         if manager and manager.fcm_token:
 
@@ -172,7 +209,7 @@ class ManagerOrdersView(APIView):
 
         manager_shop = (
             request.user
-            .managerprofile
+            .manager_profile
             .shop
         )
 
@@ -338,6 +375,15 @@ class CollectedOrderView(APIView):
 
         order = Order.objects.get(id=pk)
 
+        if order.payment_status != "paid":
+
+            return Response(
+                {
+                    "error": "Payment not received"
+                },
+                status=400
+            )
+
         order.status = "collected"
         order.collected_at = timezone.now()
         order.save()
@@ -400,12 +446,32 @@ class WalkInOrderView(APIView):
     def post(self, request):
 
         order = Order.objects.create(
+
             order_number=str(uuid.uuid4())[:10],
-            shop_id=request.data.get("shop_id"),
+
+            shop_id=request.data.get(
+                "shop_id"
+            ),
+
             order_type="walkin",
-            customer_name=request.data.get("customer_name"),
-            customer_phone=request.data.get("customer_phone"),
+
+            customer_name=request.data.get(
+                "customer_name"
+            ),
+
+            customer_phone=request.data.get(
+                "customer_phone"
+            ),
+
+            payment_method=request.data.get(
+                "payment_method",
+                "cash"
+            ),
+
+            payment_status="paid",
+
             status="accepted",
+
             total_amount=request.data.get(
                 "total_amount",
                 0
@@ -464,3 +530,93 @@ class CancelOrderView(APIView):
             }
         )
 
+class PaymentReceivedView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+
+        order = Order.objects.get(
+            id=pk
+        )
+
+        order.payment_status = "paid"
+
+        order.save()
+
+        return Response(
+            {
+                "message": "Payment Received"
+            }
+        )
+        
+class OrderDetailView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+
+        try:
+
+            order = Order.objects.get(
+                id=pk,
+                customer=request.user
+            )
+
+        except Order.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Order not found"
+                },
+                status=404
+            )
+
+        serializer = OrderSerializer(order)
+
+        return Response(
+            serializer.data
+        )
+        
+
+class ManagerDashboardView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+
+        shop = request.user.manager_profile.shop
+
+        return Response({
+
+            "pending": Order.objects.filter(
+                shop=shop,
+                status="pending"
+            ).count(),
+
+            "accepted": Order.objects.filter(
+                shop=shop,
+                status="accepted"
+            ).count(),
+
+            "preparing": Order.objects.filter(
+                shop=shop,
+                status="preparing"
+            ).count(),
+
+            "ready": Order.objects.filter(
+                shop=shop,
+                status="ready"
+            ).count(),
+
+            "collected": Order.objects.filter(
+                shop=shop,
+                status="collected"
+            ).count(),
+
+            "today_sales": Order.objects.filter(
+                shop=shop,
+                payment_status="paid"
+            ).count()
+
+        })
