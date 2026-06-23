@@ -122,6 +122,31 @@ class Order(models.Model):
         null=True,
         blank=True
     )
+    
+    estimated_minutes = models.PositiveIntegerField(
+    default=15
+    )
+
+    estimated_ready_time = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+    
+    pickup_person_name = models.CharField(
+    max_length=200,
+    blank=True,
+    null=True
+    )
+
+    pickup_person_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True
+    )
+    
+    pickup_by_other_person = models.BooleanField(
+        default=False
+    )
 
     def __str__(self):
         return self.order_number

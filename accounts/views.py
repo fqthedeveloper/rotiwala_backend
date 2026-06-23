@@ -309,6 +309,7 @@ class PasswordLoginView(APIView):
             status=status.HTTP_200_OK
         )
 
+
 class SaveFCMTokenView(APIView):
 
     permission_classes = [

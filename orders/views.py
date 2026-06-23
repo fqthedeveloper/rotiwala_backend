@@ -1,7 +1,6 @@
 import uuid
-
+from datetime import timedelta
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
@@ -32,6 +31,9 @@ from notifications.fcm import (
     send_push_notification
 )
 
+from .websocket import (
+    send_order_update
+)
 
 class PlaceOrderView(APIView):
 
@@ -50,13 +52,12 @@ class PlaceOrderView(APIView):
             )
 
         try:
-
             shop = Shop.objects.get(
-                id=shop_id
+                id=shop_id,
+                is_active=True
             )
 
         except Shop.DoesNotExist:
-
             return Response(
                 {
                     "error": "Shop not found"
@@ -65,13 +66,11 @@ class PlaceOrderView(APIView):
             )
 
         try:
-
             cart = Cart.objects.get(
                 customer=request.user
             )
 
         except Cart.DoesNotExist:
-
             return Response(
                 {
                     "error": "Cart not found"
@@ -84,7 +83,6 @@ class PlaceOrderView(APIView):
         )
 
         if not cart_items.exists():
-
             return Response(
                 {
                     "error": "Cart Empty"
@@ -97,46 +95,109 @@ class PlaceOrderView(APIView):
             "cash"
         )
 
-        pickup_time = request.data.get(
-            "pickup_time"
-        )
-
-        pickup_time_obj = None
-
-        if pickup_time:
-
-            pickup_time_obj = parse_datetime(
-                pickup_time
-            )
-
-            if (
-                pickup_time_obj and
-                timezone.is_naive(
-                    pickup_time_obj
-                )
-            ):
-                pickup_time_obj = (
-                    timezone.make_aware(
-                        pickup_time_obj
-                    )
-        )
-
         notes = request.data.get(
             "notes",
             ""
         )
 
-        order = Order.objects.create(
-            order_number=str(uuid.uuid4())[:10],
-            customer=request.user,
-            shop=shop,
-            payment_method=payment_method,
-            pickup_time=pickup_time,
-            notes=notes,
-            status="pending"
+        pickup_by_other_person = request.data.get(
+            "pickup_by_other_person",
+            False
         )
 
-        total = 0
+        pickup_person_name = request.data.get(
+            "pickup_person_name",
+            ""
+        )
+
+        pickup_person_phone = request.data.get(
+            "pickup_person_phone",
+            ""
+        )
+
+        # Validate only when another person collects
+
+        if pickup_by_other_person:
+
+            if not pickup_person_name:
+
+                return Response(
+                    {
+                        "error":
+                        "Pickup person name is required"
+                    },
+                    status=400
+                ),
+
+            if not pickup_person_phone:
+
+                return Response(
+                    {
+                        "error":
+                        "Pickup person phone is required"
+                    },
+                    status=400
+                ),
+                
+        active_orders = Order.objects.filter(
+            shop=shop,
+            status__in=[
+                "accepted",
+                "preparing"
+            ]
+        ).count()
+
+        estimated_minutes = 10
+
+        if active_orders >= 5:
+            estimated_minutes = 15
+
+        if active_orders >= 10:
+            estimated_minutes = 20
+
+        if active_orders >= 15:
+            estimated_minutes = 30
+
+        estimated_ready_time = (
+            timezone.now() +
+            timedelta(
+                minutes=estimated_minutes
+            )
+        )
+
+        order = Order.objects.create(
+
+        order_number=str(uuid.uuid4())[:10],
+
+        customer=request.user,
+
+        shop=shop,
+
+        payment_method=payment_method,
+
+        payment_status="pending",
+
+        order_type="online",
+
+        notes=notes,
+
+        status="pending",
+
+        estimated_minutes=estimated_minutes,
+
+        estimated_ready_time=estimated_ready_time,
+
+        pickup_by_other_person=
+        pickup_by_other_person,
+
+        pickup_person_name=
+        pickup_person_name,
+
+        pickup_person_phone=
+        pickup_person_phone,
+    )
+
+        total_amount = 0
 
         for item in cart_items:
 
@@ -146,50 +207,86 @@ class PlaceOrderView(APIView):
             )
 
             OrderItem.objects.create(
+
                 order=order,
+
                 item_name=item.menu_item.name,
+
                 item_price=item.menu_item.base_price,
+
                 quantity=item.quantity,
+
                 total_price=line_total
             )
 
-            total += line_total
+            total_amount += line_total
 
-        order.total_amount = total
+        order.total_amount = total_amount
+
         order.save()
 
-        profile, created = CustomerProfile.objects.get_or_create(
-            user=request.user
+        profile, created = (
+            CustomerProfile.objects
+            .get_or_create(
+                user=request.user
+            )
         )
 
         profile.total_orders += 1
+
         profile.save()
 
         manager = User.objects.filter(
+
             role="manager",
-            manager_profile__shop=shop ).first()
+
+            manager_profile__shop=shop
+
+        ).first()
 
         if manager and manager.fcm_token:
 
             send_push_notification(
+
                 token=manager.fcm_token,
-                title="New Order",
-                body=f"New Order #{order.order_number}",
+
+                title="🔥 New Order Received",
+
+                body=(
+                    f"Order #{order.order_number} "
+                    f"₹{order.total_amount}"
+                ),
+
                 data={
                     "type": "new_order",
-                    "order_id": str(order.id)
+                    "order_id": str(order.id),
+                    "shop_id": str(shop.id),
                 }
             )
 
         cart_items.delete()
 
-        return Response(
-            {
-                "message": "Order Placed",
-                "order_id": order.id,
-                "order_number": order.order_number
-            }
-        )
+        return Response({
+
+            "success": True,
+
+            "message": "Order Placed Successfully",
+
+            "order_id": order.id,
+
+            "order_number": order.order_number,
+
+            "total_amount": order.total_amount,
+
+            "estimated_minutes": estimated_minutes,
+
+            "estimated_ready_time": estimated_ready_time,
+
+            "queue_count": active_orders
+
+        })
+        
+    
 
 
 class ManagerOrdersView(APIView):
@@ -199,11 +296,8 @@ class ManagerOrdersView(APIView):
     def get(self, request):
 
         if request.user.role != "manager":
-
             return Response(
-                {
-                    "error": "Permission denied"
-                },
+                {"error": "Permission denied"},
                 status=403
             )
 
@@ -213,16 +307,40 @@ class ManagerOrdersView(APIView):
             .shop
         )
 
+        selected_date = request.GET.get(
+            "date"
+        )
+
         orders = Order.objects.filter(
             shop=manager_shop
-        ).order_by("-id")
+        )
+
+        if selected_date:
+
+            orders = orders.filter(
+                ordered_at__date=selected_date
+            )
+
+        else:
+
+            today = timezone.localdate()
+
+            orders = orders.filter(
+                ordered_at__date=today
+            )
+
+        orders = orders.order_by(
+            "-ordered_at"
+        )
 
         serializer = OrderSerializer(
             orders,
             many=True
         )
 
-        return Response(serializer.data)
+        return Response(
+            serializer.data
+        )
 
 
 class AcceptOrderView(APIView):
@@ -236,6 +354,7 @@ class AcceptOrderView(APIView):
         order.status = "accepted"
         order.accepted_at = timezone.now()
         order.save()
+        send_order_update(order)
 
         if (
             order.customer and
@@ -276,6 +395,7 @@ class RejectOrderView(APIView):
         order.status = "rejected"
         order.rejection_reason = reason
         order.save()
+        send_order_update(order)
 
         if order.customer:
 
@@ -324,6 +444,7 @@ class PreparingOrderView(APIView):
 
         order.status = "preparing"
         order.save()
+        send_order_update(order)
 
         return Response(
             {
@@ -343,7 +464,7 @@ class ReadyOrderView(APIView):
         order.status = "ready"
         order.ready_at = timezone.now()
         order.save()
-
+        send_order_update(order)
         if (
             order.customer and
             order.customer.fcm_token
@@ -387,6 +508,7 @@ class CollectedOrderView(APIView):
         order.status = "collected"
         order.collected_at = timezone.now()
         order.save()
+        send_order_update(order)
 
         if order.customer:
 
@@ -475,7 +597,7 @@ class WalkInOrderView(APIView):
             total_amount=request.data.get(
                 "total_amount",
                 0
-            )
+            ),
         )
 
         return Response(
@@ -511,6 +633,8 @@ class CancelOrderView(APIView):
 
         order.status = "cancelled"
         order.save()
+
+        send_order_update(order)
 
         profile = CustomerProfile.objects.get(
             user=request.user

@@ -32,6 +32,8 @@ ALLOWED_HOSTS = ["*"]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
+    "daphne",
+    "channels",
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
@@ -80,7 +82,8 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'rotiwala_backend.wsgi.application'
+# WSGI_APPLICATION = 'rotiwala_backend.wsgi.application'
+ASGI_APPLICATION = "rotiwala_backend.asgi.application"
 
 
 # Database
@@ -163,4 +166,15 @@ SIMPLE_JWT = {
 
     "BLACKLIST_AFTER_ROTATION":
         True,
+}
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND":
+        "channels_redis.core.RedisChannelLayer",
+
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379)],
+        },
+    },
 }
