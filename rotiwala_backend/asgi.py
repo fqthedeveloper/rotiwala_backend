@@ -17,7 +17,10 @@ from orders.routing import (
     websocket_urlpatterns
 )
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'rotiwala_backend.settings')
+os.environ.setdefault(
+    "DJANGO_SETTINGS_MODULE",
+    "rotiwala_backend.settings"
+)
 
 django_asgi_app = (
     get_asgi_application()

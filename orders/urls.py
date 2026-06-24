@@ -20,11 +20,6 @@ urlpatterns = [
     ),
 
     path(
-        "walkin/",
-        WalkInOrderView.as_view()
-    ),
-
-    path(
         "<int:pk>/accept/",
         AcceptOrderView.as_view()
     ),
@@ -67,6 +62,15 @@ urlpatterns = [
     path(
         "<int:pk>/payment/",
         PaymentReceivedView.as_view()
+    ),
+    
+    path(
+        "customer-search/",
+        CustomerSearchView.as_view()
+    ),
+    path(
+        "walkin/",
+        WalkInOrderView.as_view()
     ),
 
 ]

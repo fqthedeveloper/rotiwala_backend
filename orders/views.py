@@ -5,6 +5,7 @@ from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from decimal import Decimal
 
 from accounts.models import (
     User,
@@ -34,6 +35,15 @@ from notifications.fcm import (
 from .websocket import (
     send_order_update
 )
+
+from .utils import (
+    generate_order_number
+)
+
+from menu.models import (
+    MenuItem
+)
+
 
 class PlaceOrderView(APIView):
 
@@ -167,35 +177,50 @@ class PlaceOrderView(APIView):
 
         order = Order.objects.create(
 
-        order_number=str(uuid.uuid4())[:10],
+            order_number=
+            generate_order_number(),
 
-        customer=request.user,
+            customer=request.user,
 
-        shop=shop,
+            shop=shop,
 
-        payment_method=payment_method,
+            customer_name=(
+                request.user.get_full_name()
+                or request.user.username
+                or request.user.phone
+            ),
 
-        payment_status="pending",
+            customer_phone=
+            request.user.phone,
 
-        order_type="online",
+            payment_method=
+            payment_method,
 
-        notes=notes,
+            payment_status=
+            "pending",
 
-        status="pending",
+            order_type=
+            "online",
 
-        estimated_minutes=estimated_minutes,
+            notes=notes,
 
-        estimated_ready_time=estimated_ready_time,
+            status="pending",
 
-        pickup_by_other_person=
-        pickup_by_other_person,
+            estimated_minutes=
+            estimated_minutes,
 
-        pickup_person_name=
-        pickup_person_name,
+            estimated_ready_time=
+            estimated_ready_time,
 
-        pickup_person_phone=
-        pickup_person_phone,
-    )
+            pickup_by_other_person=
+            pickup_by_other_person,
+
+            pickup_person_name=
+            pickup_person_name,
+
+            pickup_person_phone=
+            pickup_person_phone,
+        )
 
         total_amount = 0
 
@@ -284,8 +309,7 @@ class PlaceOrderView(APIView):
 
             "queue_count": active_orders
 
-        })
-        
+        })        
     
 
 
@@ -543,71 +567,6 @@ class CollectedOrderView(APIView):
         )
 
 
-class MyOrdersView(APIView):
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-
-        orders = Order.objects.filter(
-            customer=request.user
-        ).order_by("-id")
-
-        serializer = OrderSerializer(
-            orders,
-            many=True
-        )
-
-        return Response(serializer.data)
-
-
-class WalkInOrderView(APIView):
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-
-        order = Order.objects.create(
-
-            order_number=str(uuid.uuid4())[:10],
-
-            shop_id=request.data.get(
-                "shop_id"
-            ),
-
-            order_type="walkin",
-
-            customer_name=request.data.get(
-                "customer_name"
-            ),
-
-            customer_phone=request.data.get(
-                "customer_phone"
-            ),
-
-            payment_method=request.data.get(
-                "payment_method",
-                "cash"
-            ),
-
-            payment_status="paid",
-
-            status="accepted",
-
-            total_amount=request.data.get(
-                "total_amount",
-                0
-            ),
-        )
-
-        return Response(
-            {
-                "message": "Walk-In Order Created",
-                "order_id": order.id
-            }
-        )
-
-
 class CancelOrderView(APIView):
 
     permission_classes = [IsAuthenticated]
@@ -667,12 +626,239 @@ class PaymentReceivedView(APIView):
         order.payment_status = "paid"
 
         order.save()
+        send_order_update(order)
 
         return Response(
             {
                 "message": "Payment Received"
             }
         )
+
+
+
+class MyOrdersView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+
+        orders = Order.objects.filter(
+            customer=request.user
+        ).order_by("-id")
+
+        serializer = OrderSerializer(
+            orders,
+            many=True
+        )
+
+        return Response(serializer.data)
+
+
+class WalkInOrderView(
+    APIView
+):
+
+    permission_classes = [
+        IsAuthenticated
+    ]
+
+    def post(
+        self,
+        request
+    ):
+
+        if (
+            request.user.role
+            != "manager"
+        ):
+            return Response(
+                {
+                    "error":
+                    "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            shop = (
+                request.user
+                .manager_profile
+                .shop
+            )
+
+        except:
+
+            return Response(
+                {
+                    "error":
+                    "Manager shop not assigned"
+                },
+                status=400
+            )
+
+        customer_name = (
+            request.data.get(
+                "customer_name",
+                "Walk-In Customer"
+            )
+        )
+
+        customer_phone = (
+            request.data.get(
+                "customer_phone",
+                ""
+            )
+        )
+
+        payment_method = (
+            request.data.get(
+                "payment_method",
+                "cash"
+            )
+        )
+
+        items = (
+            request.data.get(
+                "items",
+                []
+            )
+        )
+
+        if not items:
+
+            return Response(
+                {
+                    "error":
+                    "No items selected"
+                },
+                status=400
+            )
+
+        customer = None
+
+        if customer_phone:
+
+            customer = (
+                User.objects.filter(
+                    phone=
+                    customer_phone
+                ).first()
+            )
+
+            if not customer:
+
+                customer = (
+                    User.objects.create(
+
+                        username=
+                        customer_phone,
+
+                        phone=
+                        customer_phone,
+
+                        first_name=
+                        customer_name,
+
+                        role=
+                        "customer"
+                    )
+                )
+
+        order = Order.objects.create(
+
+            order_number=
+            generate_order_number(),
+
+            customer=
+            customer,
+
+            shop=
+            shop,
+
+            order_type=
+            "walkin",
+
+            customer_name=
+            customer_name,
+
+            customer_phone=
+            customer_phone,
+
+            payment_method=
+            payment_method,
+
+            payment_status=
+            "paid",
+
+            status=
+            "accepted",
+
+            accepted_at=
+            timezone.now()
+        )
+
+        total_amount = 0
+
+        for row in items:
+
+            menu_item = (
+                MenuItem.objects.get(
+                    id=row["item_id"]
+                )
+            )
+
+            quantity = int(
+                row["quantity"]
+            )
+
+            line_total = (
+                menu_item.base_price *
+                quantity
+            )
+
+            OrderItem.objects.create(
+
+                order=order,
+
+                item_name=
+                menu_item.name,
+
+                item_price=
+                menu_item.base_price,
+
+                quantity=
+                quantity,
+
+                total_price=
+                line_total
+            )
+
+            total_amount += (
+                line_total
+            )
+
+        order.total_amount = (
+            total_amount
+        )
+
+        order.save()
+
+        return Response({
+
+            "success": True,
+
+            "order_id":
+            order.id,
+
+            "order_number":
+            order.order_number,
+
+            "total_amount":
+            order.total_amount
+
+        })
+
         
 class OrderDetailView(APIView):
 
@@ -743,4 +929,103 @@ class ManagerDashboardView(APIView):
                 payment_status="paid"
             ).count()
 
+        })
+        
+
+class CustomerSearchView(
+    APIView
+):
+
+    permission_classes = [
+        IsAuthenticated
+    ]
+
+    def get(
+        self,
+        request
+    ):
+
+        phone = (
+            request.GET.get(
+                "phone",
+                ""
+            )
+            .strip()
+        )
+
+        if not phone:
+
+            return Response({
+                "found": False
+            })
+
+        normalized = (
+            phone
+            .replace(" ", "")
+            .replace("-", "")
+        )
+
+        customer = None
+
+        possible_numbers = [
+
+            normalized,
+
+            normalized.replace(
+                "+91",
+                ""
+            ),
+
+            f"+91{normalized}",
+
+        ]
+
+        for number in possible_numbers:
+
+            customer = (
+                User.objects.filter(
+                    phone=phone,
+                    role="customer"
+                ).first()
+            )
+
+            if customer:
+                break
+
+        if not customer:
+
+            return Response({
+
+                "found": False
+
+            })
+
+        profile = (
+            CustomerProfile.objects.filter(
+                user=customer
+            ).first()
+        )
+
+        return Response({
+
+            "found": True,
+
+            "id":
+            customer.id,
+
+            "name":
+            customer.first_name
+            or
+            customer.username,
+
+            "phone":
+            customer.phone,
+
+            "trust_score":
+            profile.trust_score
+            if profile else 100,
+
+            "total_orders":
+            profile.total_orders
+            if profile else 0,
         })
