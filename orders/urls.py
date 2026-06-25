@@ -68,9 +68,64 @@ urlpatterns = [
         "customer-search/",
         CustomerSearchView.as_view()
     ),
+    
     path(
-        "walkin/",
-        WalkInOrderView.as_view()
+        "walkin/cart/create/",
+        CreateWalkInCartView.as_view()
     ),
 
+    path(
+        "walkin/cart/",
+        WalkInCartListView.as_view()
+    ),
+
+    path(
+        "walkin/cart/<int:pk>/",
+        WalkInCartDetailView.as_view()
+    ),
+    
+    path(
+        "walkin/cart/<int:pk>/add-item/",
+        AddWalkInCartItemView.as_view()
+    ),
+
+    path(
+        "walkin/cart/item/<int:pk>/",
+        UpdateWalkInCartItemView.as_view()
+    ),
+
+    path(
+        "walkin/cart/item/<int:pk>/delete/",
+        DeleteWalkInCartItemView.as_view()
+    ),
+    
+    path(
+        "walkin/cart/<int:pk>/update/",
+        UpdateWalkInCartView.as_view()
+    ),
+
+    path(
+        "walkin/cart/<int:pk>/place/",
+        PlaceWalkInCartView.as_view()
+    ),
+    
+    path(
+        "walkin/order/<int:pk>/update/",
+        UpdatePlacedOrderView.as_view()
+    ),
+    
+    path(
+        "walkin/order/<int:pk>/add-item/",
+        AddPlacedOrderItemView.as_view()
+    ),
+    
+    path(
+        "walkin/order/item/<int:pk>/",
+        UpdatePlacedOrderItemView.as_view()
+    ),
+    
+    path(
+        "walkin/order/item/<int:pk>/delete/",
+        DeletePlacedOrderItemView.as_view()
+    ),
 ]

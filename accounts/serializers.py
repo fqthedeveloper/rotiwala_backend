@@ -4,7 +4,11 @@ from .models import CustomerProfile
 from .models import ManagerProfile
 
 
+
 class UserSerializer(serializers.ModelSerializer):
+
+    shop_id = serializers.SerializerMethodField()
+    shop_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -17,8 +21,22 @@ class UserSerializer(serializers.ModelSerializer):
             "phone",
             "email",
             "role",
-            "is_phone_verified"
+            "is_phone_verified",
+            "shop_id",
+            "shop_name",
         ]
+
+    def get_shop_id(self, obj):
+        try:
+            return obj.manager_profile.shop.id
+        except Exception:
+            return None
+
+    def get_shop_name(self, obj):
+        try:
+            return obj.manager_profile.shop.name
+        except Exception:
+            return None
 
 
 class CustomerProfileSerializer(serializers.ModelSerializer):

@@ -178,3 +178,192 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return self.item_name
+    
+
+# ==========================================
+# WALK-IN DRAFT CART
+# ==========================================
+
+class WalkInCart(models.Model):
+
+    STATUS_CHOICES = (
+        ("draft", "Draft"),
+        ("placed", "Placed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    cart_number = models.CharField(
+        max_length=30,
+        unique=True
+    )
+
+    manager = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="walkin_carts"
+    )
+
+    shop = models.ForeignKey(
+        Shop,
+        on_delete=models.CASCADE,
+        related_name="walkin_carts"
+    )
+
+    customer = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
+    customer_name = models.CharField(
+        max_length=200,
+        default="Walk-In Customer"
+    )
+
+    customer_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True
+    )
+
+    payment_method = models.CharField(
+        max_length=20,
+        choices=Order.PAYMENT_METHODS,
+        default="cash"
+    )
+
+    total_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0
+    )
+
+    notes = models.TextField(
+        blank=True,
+        null=True
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="draft"
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+
+        ordering = [
+            "-updated_at"
+        ]
+
+    def __str__(self):
+
+        return f"{self.cart_number} - {self.customer_name}"
+
+
+# ==========================================
+# WALK-IN CART ITEMS
+# ==========================================
+
+class WalkInCartItem(models.Model):
+
+    cart = models.ForeignKey(
+        WalkInCart,
+        on_delete=models.CASCADE,
+        related_name="items"
+    )
+
+    menu_item = models.ForeignKey(
+        MenuItem,
+        on_delete=models.CASCADE
+    )
+
+    item_name = models.CharField(
+        max_length=255
+    )
+
+    item_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    quantity = models.PositiveIntegerField(
+        default=1
+    )
+
+    total_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    def save(self, *args, **kwargs):
+
+        self.total_price = (
+            self.item_price *
+            self.quantity
+        )
+
+        super().save(
+            *args,
+            **kwargs
+        )
+
+        total = 0
+
+        for item in self.cart.items.all():
+
+            total += item.total_price
+
+        self.cart.total_amount = total
+
+        self.cart.save(
+            update_fields=[
+                "total_amount",
+                "updated_at"
+            ]
+        )
+
+    def delete(self, *args, **kwargs):
+
+        cart = self.cart
+
+        super().delete(
+            *args,
+            **kwargs
+        )
+
+        total = 0
+
+        for item in cart.items.all():
+
+            total += item.total_price
+
+        cart.total_amount = total
+
+        cart.save(
+            update_fields=[
+                "total_amount",
+                "updated_at"
+            ]
+        )
+
+    def __str__(self):
+
+        return self.item_name

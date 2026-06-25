@@ -5,7 +5,9 @@ from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework import status
 from decimal import Decimal
+
 
 from accounts.models import (
     User,
@@ -21,11 +23,14 @@ from shops.models import Shop
 
 from .models import (
     Order,
-    OrderItem
+    OrderItem,
+    WalkInCart,
+    WalkInCartItem,
 )
 
 from .serializers import (
-    OrderSerializer
+    OrderSerializer,
+    WalkInCartSerializer
 )
 
 from notifications.fcm import (
@@ -37,12 +42,15 @@ from .websocket import (
 )
 
 from .utils import (
-    generate_order_number
+    generate_order_number,
+    generate_walkin_cart_number
 )
 
 from menu.models import (
     MenuItem
 )
+
+
 
 
 class PlaceOrderView(APIView):
@@ -653,212 +661,6 @@ class MyOrdersView(APIView):
 
         return Response(serializer.data)
 
-
-class WalkInOrderView(
-    APIView
-):
-
-    permission_classes = [
-        IsAuthenticated
-    ]
-
-    def post(
-        self,
-        request
-    ):
-
-        if (
-            request.user.role
-            != "manager"
-        ):
-            return Response(
-                {
-                    "error":
-                    "Permission denied"
-                },
-                status=403
-            )
-
-        try:
-
-            shop = (
-                request.user
-                .manager_profile
-                .shop
-            )
-
-        except:
-
-            return Response(
-                {
-                    "error":
-                    "Manager shop not assigned"
-                },
-                status=400
-            )
-
-        customer_name = (
-            request.data.get(
-                "customer_name",
-                "Walk-In Customer"
-            )
-        )
-
-        customer_phone = (
-            request.data.get(
-                "customer_phone",
-                ""
-            )
-        )
-
-        payment_method = (
-            request.data.get(
-                "payment_method",
-                "cash"
-            )
-        )
-
-        items = (
-            request.data.get(
-                "items",
-                []
-            )
-        )
-
-        if not items:
-
-            return Response(
-                {
-                    "error":
-                    "No items selected"
-                },
-                status=400
-            )
-
-        customer = None
-
-        if customer_phone:
-
-            customer = (
-                User.objects.filter(
-                    phone=
-                    customer_phone
-                ).first()
-            )
-
-            if not customer:
-
-                customer = (
-                    User.objects.create(
-
-                        username=
-                        customer_phone,
-
-                        phone=
-                        customer_phone,
-
-                        first_name=
-                        customer_name,
-
-                        role=
-                        "customer"
-                    )
-                )
-
-        order = Order.objects.create(
-
-            order_number=
-            generate_order_number(),
-
-            customer=
-            customer,
-
-            shop=
-            shop,
-
-            order_type=
-            "walkin",
-
-            customer_name=
-            customer_name,
-
-            customer_phone=
-            customer_phone,
-
-            payment_method=
-            payment_method,
-
-            payment_status=
-            "paid",
-
-            status=
-            "accepted",
-
-            accepted_at=
-            timezone.now()
-        )
-
-        total_amount = 0
-
-        for row in items:
-
-            menu_item = (
-                MenuItem.objects.get(
-                    id=row["item_id"]
-                )
-            )
-
-            quantity = int(
-                row["quantity"]
-            )
-
-            line_total = (
-                menu_item.base_price *
-                quantity
-            )
-
-            OrderItem.objects.create(
-
-                order=order,
-
-                item_name=
-                menu_item.name,
-
-                item_price=
-                menu_item.base_price,
-
-                quantity=
-                quantity,
-
-                total_price=
-                line_total
-            )
-
-            total_amount += (
-                line_total
-            )
-
-        order.total_amount = (
-            total_amount
-        )
-
-        order.save()
-
-        return Response({
-
-            "success": True,
-
-            "order_id":
-            order.id,
-
-            "order_number":
-            order.order_number,
-
-            "total_amount":
-            order.total_amount
-
-        })
-
         
 class OrderDetailView(APIView):
 
@@ -930,102 +732,1365 @@ class ManagerDashboardView(APIView):
             ).count()
 
         })
-        
 
-class CustomerSearchView(
-    APIView
-):
 
-    permission_classes = [
-        IsAuthenticated
-    ]
+class CustomerSearchView(APIView):
 
-    def get(
-        self,
-        request
-    ):
+    permission_classes = [IsAuthenticated]
 
-        phone = (
-            request.GET.get(
-                "phone",
-                ""
-            )
-            .strip()
-        )
+    def get(self, request):
+
+        phone = request.GET.get("phone", "").strip()
 
         if not phone:
+            return Response({"found": False})
 
-            return Response({
-                "found": False
-            })
+        phone = (
+            phone.replace(" ", "")
+                 .replace("-", "")
+        )
 
-        normalized = (
-            phone
-            .replace(" ", "")
-            .replace("-", "")
+        if phone.startswith("91") and not phone.startswith("+91"):
+            phone = "+" + phone
+
+        possible_numbers = [
+            phone,
+            phone.replace("+91", ""),
+            "+91" + phone.replace("+91", "")
+        ]
+
+        customer = User.objects.filter(
+            role="customer",
+            phone__in=possible_numbers
+        ).first()
+
+        if not customer:
+            return Response({"found": False})
+
+        profile = CustomerProfile.objects.filter(
+            user=customer
+        ).first()
+
+        return Response({
+            "found": True,
+            "id": customer.id,
+            "name": customer.first_name or customer.username,
+            "phone": customer.phone,
+            "trust_score": profile.trust_score if profile else 100,
+            "total_orders": profile.total_orders if profile else 0,
+        })    
+
+
+class CreateWalkInCartView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            shop = request.user.manager_profile.shop
+
+        except:
+
+            return Response(
+                {
+                    "error": "Manager shop not assigned"
+                },
+                status=400
+            )
+
+        customer_name = request.data.get(
+            "customer_name",
+            "Walk-In Customer"
+        )
+
+        customer_phone = request.data.get(
+            "customer_phone",
+            ""
+        )
+
+        payment_method = request.data.get(
+            "payment_method",
+            "cash"
+        )
+
+        notes = request.data.get(
+            "notes",
+            ""
         )
 
         customer = None
 
-        possible_numbers = [
+        if customer_phone:
 
-            normalized,
-
-            normalized.replace(
-                "+91",
+            phone = customer_phone.replace(
+                " ",
                 ""
-            ),
-
-            f"+91{normalized}",
-
-        ]
-
-        for number in possible_numbers:
-
-            customer = (
-                User.objects.filter(
-                    phone=phone,
-                    role="customer"
-                ).first()
             )
 
-            if customer:
-                break
+            if not phone.startswith("+91"):
 
-        if not customer:
+                phone = "+91" + phone
 
-            return Response({
-
-                "found": False
-
-            })
-
-        profile = (
-            CustomerProfile.objects.filter(
-                user=customer
+            customer = User.objects.filter(
+                role="customer",
+                phone=phone
             ).first()
+
+            if not customer:
+
+                customer = User.objects.create(
+
+                    username=phone,
+
+                    phone=phone,
+
+                    first_name=customer_name,
+
+                    role="customer"
+
+                )
+
+        cart = WalkInCart.objects.create(
+
+            cart_number=
+            generate_walkin_cart_number(),
+
+            manager=request.user,
+
+            shop=shop,
+
+            customer=customer,
+
+            customer_name=customer_name,
+
+            customer_phone=customer_phone,
+
+            payment_method=payment_method,
+
+            notes=notes,
+
+            status="draft"
+
         )
+
+        serializer = WalkInCartSerializer(
+            cart
+        )
+
+        return Response(
+
+            serializer.data,
+
+            status=status.HTTP_201_CREATED
+
+        )
+        
+class WalkInCartListView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        shop = request.user.manager_profile.shop
+
+        carts = WalkInCart.objects.filter(
+
+            shop=shop,
+
+            status="draft"
+
+        ).order_by(
+
+            "-updated_at"
+
+        )
+
+        serializer = WalkInCartSerializer(
+
+            carts,
+
+            many=True
+
+        )
+
+        return Response(
+
+            serializer.data
+
+        )
+        
+def update_walkin_cart_total(cart):
+
+    total = Decimal("0.00")
+
+    for item in cart.items.all():
+
+        total += item.total_price
+
+    cart.total_amount = total
+
+    cart.save(update_fields=["total_amount", "updated_at"])
+    
+
+        
+class WalkInCartDetailView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            cart = WalkInCart.objects.get(
+
+                id=pk,
+
+                manager=request.user
+
+            )
+
+        except WalkInCart.DoesNotExist:
+
+            return Response(
+
+                {
+                    "error": "Cart not found"
+                },
+
+                status=404
+
+            )
+
+        serializer = WalkInCartSerializer(
+
+            cart
+
+        )
+
+        return Response(
+
+            serializer.data
+
+        )
+
+
+class AddWalkInCartItemView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            cart = WalkInCart.objects.get(
+
+                id=pk,
+
+                manager=request.user,
+
+                status="draft"
+
+            )
+
+        except WalkInCart.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Cart not found"
+                },
+                status=404
+            )
+
+        menu_item_id = request.data.get("menu_item")
+
+        quantity = int(
+            request.data.get(
+                "quantity",
+                1
+            )
+        )
+
+        try:
+
+            menu_item = MenuItem.objects.get(
+                id=menu_item_id,
+                is_available=True
+            )
+
+        except MenuItem.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Menu item not found"
+                },
+                status=404
+            )
+
+        cart_item = WalkInCartItem.objects.filter(
+
+            cart=cart,
+
+            menu_item=menu_item
+
+        ).first()
+
+        if cart_item:
+
+            cart_item.quantity += quantity
+
+            cart_item.save()
+
+        else:
+
+            cart_item = WalkInCartItem.objects.create(
+
+                cart=cart,
+
+                menu_item=menu_item,
+
+                item_name=menu_item.name,
+
+                item_price=menu_item.base_price,
+
+                quantity=quantity
+
+            )
+
+        update_walkin_cart_total(cart)
+
+        serializer = WalkInCartSerializer(cart)
+
+        return Response(serializer.data)
+    
+    
+class UpdateWalkInCartItemView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            item = WalkInCartItem.objects.get(
+                id=pk,
+                cart__manager=request.user,
+                cart__status="draft"
+            )
+
+        except WalkInCartItem.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Item not found"
+                },
+                status=404
+            )
+
+        quantity = int(
+            request.data.get(
+                "quantity",
+                1
+            )
+        )
+
+        if quantity <= 0:
+
+            item.delete()
+
+            return Response(
+                {
+                    "message": "Item removed"
+                }
+            )
+
+        item.quantity = quantity
+
+        item.save()
+
+        update_walkin_cart_total(item.cart)
+
+        serializer = WalkInCartSerializer(item.cart)
+
+        return Response(serializer.data)
+    
+    
+class DeleteWalkInCartItemView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            item = WalkInCartItem.objects.get(
+                id=pk,
+                cart__manager=request.user,
+                cart__status="draft"
+            )
+
+        except WalkInCartItem.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Item not found"
+                },
+                status=404
+            )
+
+        cart = item.cart
+
+        item.delete()
+
+        update_walkin_cart_total(cart)
+
+        serializer = WalkInCartSerializer(cart)
+
+        return Response(serializer.data)
+    
+
+class UpdateWalkInCartView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            cart = WalkInCart.objects.get(
+
+                id=pk,
+
+                manager=request.user,
+
+                status="draft"
+
+            )
+
+        except WalkInCart.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Cart not found"
+                },
+                status=404
+            )
+
+        customer_name = request.data.get(
+            "customer_name",
+            cart.customer_name
+        )
+
+        customer_phone = request.data.get(
+            "customer_phone",
+            cart.customer_phone
+        )
+
+        payment_method = request.data.get(
+            "payment_method",
+            cart.payment_method
+        )
+
+        notes = request.data.get(
+            "notes",
+            cart.notes
+        )
+
+        customer = None
+
+        if customer_phone:
+
+            phone = (
+                customer_phone
+                .replace(" ", "")
+                .replace("-", "")
+            )
+
+            if phone.startswith("91") and not phone.startswith("+91"):
+
+                phone = "+" + phone
+
+            elif not phone.startswith("+91"):
+
+                phone = "+91" + phone
+
+            customer = User.objects.filter(
+
+                role="customer",
+
+                phone=phone
+
+            ).first()
+
+            if not customer:
+
+                customer = User.objects.create(
+
+                    username=phone,
+
+                    phone=phone,
+
+                    first_name=customer_name,
+
+                    role="customer"
+
+                )
+
+        cart.customer = customer
+
+        cart.customer_name = customer_name
+
+        cart.customer_phone = customer_phone
+
+        cart.payment_method = payment_method
+
+        cart.notes = notes
+
+        cart.save()
+
+        serializer = WalkInCartSerializer(cart)
+
+        return Response(serializer.data)
+      
+      
+class PlaceWalkInCartView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            cart = WalkInCart.objects.get(
+
+                id=pk,
+
+                manager=request.user,
+
+                status="draft"
+
+            )
+
+        except WalkInCart.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Draft cart not found"
+                },
+                status=404
+            )
+
+        if not cart.items.exists():
+
+            return Response(
+                {
+                    "error": "Cart is empty"
+                },
+                status=400
+            )
+
+        order = Order.objects.create(
+
+            order_number=
+            generate_walkin_cart_number(),
+
+            customer=
+            cart.customer,
+
+            shop=
+            cart.shop,
+
+            payment_method=
+            cart.payment_method,
+
+            payment_status=
+            "paid",
+
+            order_type=
+            "walkin",
+
+            status=
+            "accepted",
+
+            accepted_at=
+            timezone.now(),
+
+            customer_name=
+            cart.customer_name,
+
+            customer_phone=
+            cart.customer_phone,
+
+            notes=
+            cart.notes,
+
+            total_amount=
+            cart.total_amount
+
+        )
+
+        for item in cart.items.all():
+
+            OrderItem.objects.create(
+
+                order=order,
+
+                item_name=
+                item.item_name,
+
+                item_price=
+                item.item_price,
+
+                quantity=
+                item.quantity,
+
+                total_price=
+                item.total_price
+
+            )
+
+        if order.customer:
+
+            profile, created = CustomerProfile.objects.get_or_create(
+                user=order.customer
+            )
+
+            profile.total_orders += 1
+
+            profile.save()
+
+        cart.status = "placed"
+
+        cart.save()
+
+        cart.items.all().delete()
+
+        serializer = OrderSerializer(order)
 
         return Response({
 
-            "found": True,
+            "success": True,
 
-            "id":
-            customer.id,
+            "message": "Walk-In Order Created",
 
-            "name":
-            customer.first_name
-            or
-            customer.username,
+            "order": serializer.data
 
-            "phone":
-            customer.phone,
+        })
+        
+def update_order_total(order):
 
-            "trust_score":
-            profile.trust_score
-            if profile else 100,
+    total = Decimal("0.00")
 
-            "total_orders":
-            profile.total_orders
-            if profile else 0,
+    for item in order.items.all():
+
+        total += item.total_price
+
+    order.total_amount = total
+
+    order.save(
+        update_fields=[
+            "total_amount"
+        ]
+    )
+    
+    
+class UpdatePlacedOrderView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    EDITABLE_STATUS = [
+        "pending",
+        "accepted",
+        "preparing",
+        "ready",
+    ]
+
+    def patch(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            shop = request.user.manager_profile.shop
+
+        except:
+
+            return Response(
+                {
+                    "error": "Manager shop not assigned"
+                },
+                status=400
+            )
+
+        try:
+
+            order = Order.objects.get(
+
+                id=pk,
+
+                shop=shop,
+
+                order_type="walkin"
+
+            )
+
+        except Order.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Walk-In order not found"
+                },
+                status=404
+            )
+
+        if order.status not in self.EDITABLE_STATUS:
+
+            return Response(
+                {
+                    "error": "This order can no longer be edited."
+                },
+                status=400
+            )
+
+        customer_name = request.data.get(
+            "customer_name",
+            order.customer_name
+        )
+
+        customer_phone = request.data.get(
+            "customer_phone",
+            order.customer_phone
+        )
+
+        payment_method = request.data.get(
+            "payment_method",
+            order.payment_method
+        )
+
+        payment_status = request.data.get(
+            "payment_status",
+            order.payment_status
+        )
+
+        notes = request.data.get(
+            "notes",
+            order.notes
+        )
+
+        customer = order.customer
+
+        if customer_phone:
+
+            phone = (
+                customer_phone
+                .replace(" ", "")
+                .replace("-", "")
+            )
+
+            if phone.startswith("91") and not phone.startswith("+91"):
+
+                phone = "+" + phone
+
+            elif not phone.startswith("+91"):
+
+                phone = "+91" + phone
+
+            customer = User.objects.filter(
+
+                role="customer",
+
+                phone=phone
+
+            ).first()
+
+            if not customer:
+
+                customer = User.objects.create(
+
+                    username=phone,
+
+                    phone=phone,
+
+                    first_name=customer_name,
+
+                    role="customer"
+
+                )
+
+        order.customer = customer
+
+        order.customer_name = customer_name
+
+        order.customer_phone = customer_phone
+
+        order.payment_method = payment_method
+
+        order.payment_status = payment_status
+
+        order.notes = notes
+
+        estimated_minutes = request.data.get(
+            "estimated_minutes"
+        )
+
+        if estimated_minutes is not None:
+
+            try:
+
+                estimated_minutes = int(
+                    estimated_minutes
+                )
+
+                order.estimated_minutes = (
+                    estimated_minutes
+                )
+
+                order.estimated_ready_time = (
+                    timezone.now() +
+                    timedelta(
+                        minutes=estimated_minutes
+                    )
+                )
+
+            except:
+
+                pass
+
+        pickup_by_other_person = request.data.get(
+            "pickup_by_other_person"
+        )
+
+        if pickup_by_other_person is not None:
+
+            order.pickup_by_other_person = (
+                pickup_by_other_person
+            )
+
+        order.pickup_person_name = request.data.get(
+
+            "pickup_person_name",
+
+            order.pickup_person_name
+
+        )
+
+        order.pickup_person_phone = request.data.get(
+
+            "pickup_person_phone",
+
+            order.pickup_person_phone
+
+        )
+
+        order.save()
+
+        send_order_update(order)
+
+        serializer = OrderSerializer(order)
+
+        return Response({
+
+            "success": True,
+
+            "message": "Walk-In order updated successfully.",
+
+            "order": serializer.data
+
+        })
+        
+
+class AddPlacedOrderItemView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    EDITABLE_STATUS = [
+        "pending",
+        "accepted",
+        "preparing",
+        "ready",
+    ]
+
+    def post(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            shop = request.user.manager_profile.shop
+
+        except Exception:
+
+            return Response(
+                {
+                    "error": "Manager shop not assigned"
+                },
+                status=400
+            )
+
+        try:
+
+            order = Order.objects.get(
+                id=pk,
+                shop=shop,
+                order_type="walkin"
+            )
+
+        except Order.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Walk-In order not found"
+                },
+                status=404
+            )
+
+        if order.status not in self.EDITABLE_STATUS:
+
+            return Response(
+                {
+                    "error": "Order cannot be edited."
+                },
+                status=400
+            )
+
+        menu_item_id = request.data.get("menu_item")
+
+        quantity = int(
+            request.data.get(
+                "quantity",
+                1
+            )
+        )
+
+        if quantity <= 0:
+
+            quantity = 1
+
+        if not menu_item_id:
+
+            return Response(
+                {
+                    "error": "menu_item is required"
+                },
+                status=400
+            )
+
+        try:
+
+            menu_item = MenuItem.objects.get(
+                id=menu_item_id,
+                is_available=True
+            )
+
+        except MenuItem.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Menu item not found"
+                },
+                status=404
+            )
+
+        existing_item = OrderItem.objects.filter(
+
+            order=order,
+
+            item_name=menu_item.name,
+
+            item_price=menu_item.base_price
+
+        ).first()
+
+        if existing_item:
+
+            existing_item.quantity += quantity
+
+            existing_item.total_price = (
+                existing_item.item_price *
+                existing_item.quantity
+            )
+
+            existing_item.save()
+
+        else:
+
+            OrderItem.objects.create(
+
+                order=order,
+
+                item_name=menu_item.name,
+
+                item_price=menu_item.base_price,
+
+                quantity=quantity,
+
+                total_price=(
+                    menu_item.base_price *
+                    quantity
+                )
+
+            )
+
+        update_order_total(order)
+
+        send_order_update(order)
+
+        serializer = OrderSerializer(order)
+
+        return Response({
+
+            "success": True,
+
+            "message": "Item added successfully.",
+
+            "order": serializer.data
+
+        })
+        
+
+class UpdatePlacedOrderItemView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    EDITABLE_STATUS = [
+        "pending",
+        "accepted",
+        "preparing",
+        "ready",
+    ]
+
+    def patch(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            item = OrderItem.objects.select_related(
+                "order"
+            ).get(
+                id=pk
+            )
+
+        except OrderItem.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Order item not found"
+                },
+                status=404
+            )
+
+        order = item.order
+
+        if order.order_type != "walkin":
+
+            return Response(
+                {
+                    "error": "Only Walk-In orders can be edited."
+                },
+                status=400
+            )
+
+        try:
+
+            shop = request.user.manager_profile.shop
+
+        except:
+
+            return Response(
+                {
+                    "error": "Manager shop not assigned"
+                },
+                status=400
+            )
+
+        if order.shop != shop:
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        if order.status not in self.EDITABLE_STATUS:
+
+            return Response(
+                {
+                    "error": "Order cannot be edited."
+                },
+                status=400
+            )
+
+        quantity = request.data.get(
+            "quantity"
+        )
+
+        if quantity is None:
+
+            return Response(
+                {
+                    "error": "quantity is required"
+                },
+                status=400
+            )
+
+        try:
+
+            quantity = int(quantity)
+
+        except:
+
+            return Response(
+                {
+                    "error": "Invalid quantity"
+                },
+                status=400
+            )
+
+        if quantity <= 0:
+
+            item.delete()
+
+            update_order_total(order)
+
+            send_order_update(order)
+
+            serializer = OrderSerializer(order)
+
+            return Response({
+
+                "success": True,
+
+                "message": "Item removed.",
+
+                "order": serializer.data
+
+            })
+
+        item.quantity = quantity
+
+        item.total_price = (
+            item.item_price *
+            quantity
+        )
+
+        item.save()
+
+        update_order_total(order)
+
+        send_order_update(order)
+
+        serializer = OrderSerializer(order)
+
+        return Response({
+
+            "success": True,
+
+            "message": "Quantity updated.",
+
+            "order": serializer.data
+
+        })
+        
+class DeletePlacedOrderItemView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    EDITABLE_STATUS = [
+        "pending",
+        "accepted",
+        "preparing",
+        "ready",
+    ]
+
+    def delete(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            item = OrderItem.objects.select_related(
+                "order"
+            ).get(
+                id=pk
+            )
+
+        except OrderItem.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Order item not found"
+                },
+                status=404
+            )
+
+        order = item.order
+
+        if order.order_type != "walkin":
+
+            return Response(
+                {
+                    "error": "Only Walk-In orders can be edited."
+                },
+                status=400
+            )
+
+        try:
+
+            shop = request.user.manager_profile.shop
+
+        except:
+
+            return Response(
+                {
+                    "error": "Manager shop not assigned"
+                },
+                status=400
+            )
+
+        if order.shop != shop:
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        if order.status not in self.EDITABLE_STATUS:
+
+            return Response(
+                {
+                    "error": "This order can no longer be edited."
+                },
+                status=400
+            )
+
+        if order.items.count() == 1:
+
+            return Response(
+                {
+                    "error": "Order must contain at least one item."
+                },
+                status=400
+            )
+
+        item.delete()
+
+        update_order_total(order)
+
+        send_order_update(order)
+
+        serializer = OrderSerializer(order)
+
+        return Response({
+
+            "success": True,
+
+            "message": "Item deleted successfully.",
+
+            "order": serializer.data
+
         })
