@@ -734,52 +734,282 @@ class ManagerDashboardView(APIView):
         })
 
 
+# ==========================================
+# CUSTOMER SEARCH
+# ==========================================
+
 class CustomerSearchView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-
-        phone = request.GET.get("phone", "").strip()
+    def normalize_phone(self, phone):
 
         if not phone:
-            return Response({"found": False})
+            return ""
 
         phone = (
-            phone.replace(" ", "")
+            phone.strip()
+                 .replace(" ", "")
                  .replace("-", "")
         )
 
-        if phone.startswith("91") and not phone.startswith("+91"):
-            phone = "+" + phone
+        if phone.startswith("+91"):
+            phone = phone[3:]
+
+        elif phone.startswith("91"):
+            phone = phone[2:]
+
+        return phone
+
+    def get(self, request):
+
+        phone = request.GET.get("phone", "")
+
+        phone = self.normalize_phone(phone)
+
+        if not phone:
+
+            return Response({
+                "found": False
+            })
 
         possible_numbers = [
+
             phone,
-            phone.replace("+91", ""),
-            "+91" + phone.replace("+91", "")
+
+            "+91" + phone,
+
+            "91" + phone,
+
         ]
 
-        customer = User.objects.filter(
-            role="customer",
-            phone__in=possible_numbers
-        ).first()
+        customer = (
+            User.objects
+            .filter(
+                role="customer",
+                phone__in=possible_numbers
+            )
+            .first()
+        )
 
         if not customer:
-            return Response({"found": False})
 
-        profile = CustomerProfile.objects.filter(
-            user=customer
-        ).first()
+            return Response({
+
+                "found": False,
+
+                "phone": "+91" + phone,
+
+            })
+
+        profile, _ = CustomerProfile.objects.get_or_create(
+
+            user=customer,
+
+            defaults={
+
+                "trust_score": 100,
+
+                "total_orders": 0,
+
+            }
+
+        )
 
         return Response({
-            "found": True,
-            "id": customer.id,
-            "name": customer.first_name or customer.username,
-            "phone": customer.phone,
-            "trust_score": profile.trust_score if profile else 100,
-            "total_orders": profile.total_orders if profile else 0,
-        })    
 
+            "found": True,
+
+            "id": customer.id,
+
+            "name": customer.first_name or customer.username,
+
+            "phone": customer.phone,
+
+            "trust_score": profile.trust_score,
+
+            "total_orders": profile.total_orders,
+
+        })
+        
+        
+# ==========================================
+# GET OR CREATE CUSTOMER
+# ==========================================
+
+from django.db import transaction
+from accounts.models import User, CustomerProfile
+
+
+def get_or_create_customer(phone, name):
+
+    if not phone:
+        return None
+
+    # ---------------------------------------
+    # Normalize Phone
+    # ---------------------------------------
+
+    phone = (
+        phone.strip()
+        .replace(" ", "")
+        .replace("-", "")
+    )
+
+    if phone.startswith("+91"):
+        clean_phone = phone[3:]
+
+    elif phone.startswith("91"):
+        clean_phone = phone[2:]
+
+    else:
+        clean_phone = phone
+
+    full_phone = "+91" + clean_phone
+
+    possible_numbers = [
+
+        clean_phone,
+
+        "91" + clean_phone,
+
+        full_phone,
+
+    ]
+
+    # ---------------------------------------
+    # Existing Customer
+    # ---------------------------------------
+
+    customer = (
+
+        User.objects
+
+        .filter(
+
+            role="customer",
+
+            phone__in=possible_numbers,
+
+        )
+
+        .first()
+
+    )
+
+    if customer:
+
+        CustomerProfile.objects.get_or_create(
+
+            user=customer,
+
+            defaults={
+
+                "trust_score": 100,
+
+                "total_orders": 0,
+
+            }
+
+        )
+
+        return customer
+
+    # ---------------------------------------
+    # Create Customer
+    # ---------------------------------------
+
+    with transaction.atomic():
+
+        customer = (
+
+            User.objects
+
+            .select_for_update()
+
+            .filter(
+
+                role="customer",
+
+                phone__in=possible_numbers,
+
+            )
+
+            .first()
+
+        )
+
+        if customer:
+
+            CustomerProfile.objects.get_or_create(
+
+                user=customer,
+
+                defaults={
+
+                    "trust_score": 100,
+
+                    "total_orders": 0,
+
+                }
+
+            )
+
+            return customer
+
+        username = clean_phone
+
+        counter = 1
+
+        while User.objects.filter(username=username).exists():
+
+            username = f"{clean_phone}_{counter}"
+
+            counter += 1
+
+        customer = User(
+
+            username=username,
+
+            first_name=name or "Walk-In Customer",
+
+            phone=full_phone,
+
+            role="customer",
+
+            is_active=True,
+
+            is_phone_verified=True,
+
+        )
+
+        # ---------------------------------------
+        # Default Password = Mobile Number
+        # Example:
+        # Phone : 9876543210
+        # Password : 9876543210
+        # ---------------------------------------
+
+        customer.set_password(clean_phone)
+
+        customer.save()
+
+        CustomerProfile.objects.create(
+
+            user=customer,
+
+            trust_score=100,
+
+            total_orders=0,
+
+        )
+
+        return customer
+    
+
+# ==========================================
+# CREATE WALK-IN CART
+# ==========================================
 
 class CreateWalkInCartView(APIView):
 
@@ -793,30 +1023,36 @@ class CreateWalkInCartView(APIView):
                 {
                     "error": "Permission denied"
                 },
-                status=403
+                status=status.HTTP_403_FORBIDDEN
             )
 
         try:
 
             shop = request.user.manager_profile.shop
 
-        except:
+        except Exception:
 
             return Response(
                 {
                     "error": "Manager shop not assigned"
                 },
-                status=400
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-        customer_name = request.data.get(
-            "customer_name",
-            "Walk-In Customer"
+        customer_name = (
+            request.data.get(
+                "customer_name",
+                ""
+            )
+            .strip()
         )
 
-        customer_phone = request.data.get(
-            "customer_phone",
-            ""
+        customer_phone = (
+            request.data.get(
+                "customer_phone",
+                ""
+            )
+            .strip()
         )
 
         payment_method = request.data.get(
@@ -829,48 +1065,45 @@ class CreateWalkInCartView(APIView):
             ""
         )
 
-        customer = None
+        # ------------------------------------
+        # Normalize Phone
+        # ------------------------------------
 
         if customer_phone:
 
-            phone = customer_phone.replace(
-                " ",
-                ""
+            customer_phone = (
+                customer_phone
+                .replace(" ", "")
+                .replace("-", "")
             )
 
-            if not phone.startswith("+91"):
+            if customer_phone.startswith("+91"):
 
-                phone = "+91" + phone
+                pass
 
-            customer = User.objects.filter(
-                role="customer",
-                phone=phone
-            ).first()
+            elif customer_phone.startswith("91"):
 
-            if not customer:
+                customer_phone = "+" + customer_phone
 
-                customer = User.objects.create(
+            else:
 
-                    username=phone,
+                customer_phone = "+91" + customer_phone
 
-                    phone=phone,
-
-                    first_name=customer_name,
-
-                    role="customer"
-
-                )
+        # ------------------------------------
+        # DO NOT CREATE CUSTOMER HERE
+        # Customer will be created only
+        # when the order is placed.
+        # ------------------------------------
 
         cart = WalkInCart.objects.create(
 
-            cart_number=
-            generate_walkin_cart_number(),
+            cart_number=generate_walkin_cart_number(),
 
             manager=request.user,
 
             shop=shop,
 
-            customer=customer,
+            customer=None,
 
             customer_name=customer_name,
 
@@ -880,13 +1113,13 @@ class CreateWalkInCartView(APIView):
 
             notes=notes,
 
-            status="draft"
+            status="draft",
+
+            total_amount=Decimal("0.00")
 
         )
 
-        serializer = WalkInCartSerializer(
-            cart
-        )
+        serializer = WalkInCartSerializer(cart)
 
         return Response(
 
@@ -1204,6 +1437,10 @@ class DeleteWalkInCartItemView(APIView):
         return Response(serializer.data)
     
 
+# ==========================================
+# UPDATE WALK-IN CART
+# ==========================================
+
 class UpdateWalkInCartView(APIView):
 
     permission_classes = [IsAuthenticated]
@@ -1216,7 +1453,7 @@ class UpdateWalkInCartView(APIView):
                 {
                     "error": "Permission denied"
                 },
-                status=403
+                status=status.HTTP_403_FORBIDDEN
             )
 
         try:
@@ -1234,71 +1471,115 @@ class UpdateWalkInCartView(APIView):
         except WalkInCart.DoesNotExist:
 
             return Response(
+
                 {
                     "error": "Cart not found"
                 },
-                status=404
+
+                status=status.HTTP_404_NOT_FOUND
+
             )
 
+        # -------------------------------------
+        # Customer Name
+        # -------------------------------------
+
         customer_name = request.data.get(
+
             "customer_name",
+
             cart.customer_name
-        )
+
+        ).strip()
+
+        # -------------------------------------
+        # Customer Phone
+        # -------------------------------------
 
         customer_phone = request.data.get(
+
             "customer_phone",
+
             cart.customer_phone
-        )
+
+        ).strip()
+
+        if customer_phone:
+
+            customer_phone = (
+
+                customer_phone
+
+                .replace(" ", "")
+
+                .replace("-", "")
+
+            )
+
+            if customer_phone.startswith("+91"):
+
+                pass
+
+            elif customer_phone.startswith("91"):
+
+                customer_phone = "+" + customer_phone
+
+            else:
+
+                customer_phone = "+91" + customer_phone
+
+        # -------------------------------------
+        # Payment Method
+        # -------------------------------------
 
         payment_method = request.data.get(
+
             "payment_method",
+
             cart.payment_method
+
         )
 
+        # -------------------------------------
+        # Notes
+        # -------------------------------------
+
         notes = request.data.get(
+
             "notes",
+
             cart.notes
+
         )
+
+        # -------------------------------------
+        # Search Existing Customer Only
+        # DO NOT CREATE CUSTOMER
+        # -------------------------------------
 
         customer = None
 
         if customer_phone:
 
-            phone = (
-                customer_phone
-                .replace(" ", "")
-                .replace("-", "")
-            )
-
-            if phone.startswith("91") and not phone.startswith("+91"):
-
-                phone = "+" + phone
-
-            elif not phone.startswith("+91"):
-
-                phone = "+91" + phone
-
             customer = User.objects.filter(
 
                 role="customer",
 
-                phone=phone
+                phone__in=[
+
+                    customer_phone,
+
+                    customer_phone.replace("+91", ""),
+
+                    customer_phone.replace("+91", "91"),
+
+                ]
 
             ).first()
 
-            if not customer:
-
-                customer = User.objects.create(
-
-                    username=phone,
-
-                    phone=phone,
-
-                    first_name=customer_name,
-
-                    role="customer"
-
-                )
+        # -------------------------------------
+        # Update Draft
+        # -------------------------------------
 
         cart.customer = customer
 
@@ -1310,11 +1591,35 @@ class UpdateWalkInCartView(APIView):
 
         cart.notes = notes
 
-        cart.save()
+        cart.save(
+
+            update_fields=[
+
+                "customer",
+
+                "customer_name",
+
+                "customer_phone",
+
+                "payment_method",
+
+                "notes",
+
+                "updated_at",
+
+            ]
+
+        )
 
         serializer = WalkInCartSerializer(cart)
 
-        return Response(serializer.data)
+        return Response(
+
+            serializer.data,
+
+            status=status.HTTP_200_OK
+
+        )
       
       
 class PlaceWalkInCartView(APIView):
@@ -1542,75 +1847,198 @@ class UpdatePlacedOrderView(APIView):
             order.customer_phone
         )
 
-        payment_method = request.data.get(
-            "payment_method",
-            order.payment_method
-        )
+# ==========================================
+# UPDATE PLACED WALK-IN ORDER
+# ==========================================
 
-        payment_status = request.data.get(
-            "payment_status",
-            order.payment_status
-        )
+class UpdatePlacedOrderView(APIView):
 
-        notes = request.data.get(
-            "notes",
-            order.notes
-        )
+    permission_classes = [IsAuthenticated]
 
-        customer = order.customer
+    EDITABLE_STATUS = [
+
+        "pending",
+
+        "accepted",
+
+        "preparing",
+
+        "ready",
+
+    ]
+    
+    @transaction.atomic
+    def patch(self, request, pk):
+
+        if request.user.role != "manager":
+
+            return Response(
+
+                {
+                    "error": "Permission denied"
+                },
+
+                status=status.HTTP_403_FORBIDDEN
+
+            )
+
+        try:
+
+            shop = request.user.manager_profile.shop
+
+        except Exception:
+
+            return Response(
+
+                {
+                    "error": "Manager shop not assigned"
+                },
+
+                status=status.HTTP_400_BAD_REQUEST
+
+            )
+
+        try:
+
+            order = Order.objects.select_for_update().get(
+
+                id=pk,
+
+                shop=shop,
+
+                order_type="walkin",
+
+            )
+
+        except Order.DoesNotExist:
+
+            return Response(
+
+                {
+                    "error": "Walk-In order not found"
+                },
+
+                status=status.HTTP_404_NOT_FOUND
+
+            )
+
+        if order.status not in self.EDITABLE_STATUS:
+
+            return Response(
+
+                {
+                    "error": "This order can no longer be edited."
+                },
+
+                status=status.HTTP_400_BAD_REQUEST
+
+            )
+        
+        customer_name = request.data.get(
+
+            "customer_name",
+
+            order.customer_name
+
+        ).strip()
+
+        customer_phone = request.data.get(
+
+            "customer_phone",
+
+            order.customer_phone
+
+        ).strip()
+        
+        customer = None
 
         if customer_phone:
 
-            phone = (
+            customer_phone = (
+
                 customer_phone
+
                 .replace(" ", "")
+
                 .replace("-", "")
+
             )
 
-            if phone.startswith("91") and not phone.startswith("+91"):
+            if customer_phone.startswith("+91"):
 
-                phone = "+" + phone
+                pass
 
-            elif not phone.startswith("+91"):
+            elif customer_phone.startswith("91"):
 
-                phone = "+91" + phone
+                customer_phone = "+" + customer_phone
 
-            customer = User.objects.filter(
+            else:
 
-                role="customer",
+                customer_phone = "+91" + customer_phone
 
-                phone=phone
+            customer = get_or_create_customer(
 
-            ).first()
+                customer_phone,
 
-            if not customer:
+                customer_name,
 
-                customer = User.objects.create(
+            )
+            
+        payment_method = request.data.get(
 
-                    username=phone,
+            "payment_method",
 
-                    phone=phone,
+            order.payment_method
 
-                    first_name=customer_name,
+        )
 
-                    role="customer"
+        payment_status = request.data.get(
 
-                )
+            "payment_status",
 
+            order.payment_status
+
+        )
+
+        notes = request.data.get(
+
+            "notes",
+
+            order.notes
+
+        )
         order.customer = customer
 
-        order.customer_name = customer_name
+        order.customer_name = (
 
-        order.customer_phone = customer_phone
+            customer.first_name
+
+            if customer
+
+            else customer_name
+
+        )
+
+        order.customer_phone = (
+
+            customer.phone
+
+            if customer
+
+            else customer_phone
+
+        )
 
         order.payment_method = payment_method
 
         order.payment_status = payment_status
 
         order.notes = notes
-
+        
         estimated_minutes = request.data.get(
+
             "estimated_minutes"
+
         )
 
         if estimated_minutes is not None:
@@ -1618,66 +2046,109 @@ class UpdatePlacedOrderView(APIView):
             try:
 
                 estimated_minutes = int(
+
                     estimated_minutes
+
                 )
 
-                order.estimated_minutes = (
-                    estimated_minutes
-                )
+                if estimated_minutes > 0:
 
-                order.estimated_ready_time = (
-                    timezone.now() +
-                    timedelta(
-                        minutes=estimated_minutes
+                    order.estimated_minutes = (
+
+                        estimated_minutes
+
                     )
-                )
 
-            except:
+                    order.estimated_ready_time = (
+
+                        timezone.now()
+
+                        +
+
+                        timedelta(
+
+                            minutes=estimated_minutes
+
+                        )
+
+                    )
+
+            except ValueError:
 
                 pass
+            
+            pickup_by_other_person = request.data.get(
 
-        pickup_by_other_person = request.data.get(
-            "pickup_by_other_person"
-        )
+                "pickup_by_other_person"
 
-        if pickup_by_other_person is not None:
-
-            order.pickup_by_other_person = (
-                pickup_by_other_person
             )
 
-        order.pickup_person_name = request.data.get(
+            if pickup_by_other_person is not None:
 
-            "pickup_person_name",
+                order.pickup_by_other_person = (
 
-            order.pickup_person_name
+                    pickup_by_other_person
 
-        )
+                )
 
-        order.pickup_person_phone = request.data.get(
+            order.pickup_person_name = request.data.get(
 
-            "pickup_person_phone",
+                "pickup_person_name",
 
-            order.pickup_person_phone
+                order.pickup_person_name
 
-        )
+            )
 
+            order.pickup_person_phone = request.data.get(
+
+                "pickup_person_phone",
+
+                order.pickup_person_phone
+
+            )
         order.save()
+        if customer:
 
-        send_order_update(order)
+            CustomerProfile.objects.get_or_create(
 
-        serializer = OrderSerializer(order)
+                user=customer,
 
-        return Response({
+                defaults={
 
-            "success": True,
+                    "trust_score": 100,
 
-            "message": "Walk-In order updated successfully.",
+                    "total_orders": 0,
 
-            "order": serializer.data
+                }
 
-        })
+            )
+            send_order_update(
+
+            order
+
+        )
         
+            serializer = OrderSerializer(
+
+            order
+
+        )
+        return Response(
+
+            {
+
+                "success": True,
+
+                "message": "Walk-In order updated successfully.",
+
+                "order": serializer.data,
+
+            },
+
+            status=status.HTTP_200_OK
+
+        )
+                    
 
 class AddPlacedOrderItemView(APIView):
 
