@@ -32,6 +32,8 @@ class OrderSerializer(serializers.ModelSerializer):
 
     customer_phone = serializers.SerializerMethodField()
 
+    pickup_display = serializers.SerializerMethodField()
+
     class Meta:
 
         model = Order
@@ -58,6 +60,20 @@ class OrderSerializer(serializers.ModelSerializer):
 
         if obj.customer:
             return obj.customer.phone
+
+        return None
+
+    def get_pickup_display(self, obj):
+
+        if obj.pickup_type == "instant":
+
+            return "Prepare Immediately"
+
+        if obj.pickup_time:
+
+            return obj.pickup_time.strftime(
+                "%d %b %Y %I:%M %p"
+            )
 
         return None
 
@@ -135,6 +151,8 @@ class WalkInCartSerializer(serializers.ModelSerializer):
             "customer_phone",
 
             "payment_method",
+
+            "payment_status",
 
             "notes",
 

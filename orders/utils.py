@@ -1,46 +1,83 @@
 from django.utils import timezone
 
-from .models import (
-    Order,
-    WalkInCart,
-)
+from .models import Order, WalkInCart
 
-
-def generate_order_number():
+def generate_online_order_number(shop):
 
     today = timezone.localdate()
 
-    prefix = today.strftime(
-        "RT-O-%m%d"
-    )
+    prefix = today.strftime("%m%d")
 
-    count = (
+    last = (
         Order.objects.filter(
-            ordered_at__date=today
-        ).count()
-        + 1
+            shop=shop,
+            order_type="online",
+            ordered_at__date=today,
+        )
+        .order_by("-id")
+        .first()
     )
 
-    return (
-        f"{prefix}-{count:05d}"
-    )
+    number = 1
+
+    if last:
+        try:
+            number = int(last.order_number.split("-")[-1]) + 1
+        except Exception:
+            pass
+
+    return f"{shop.shop_code}-O-{prefix}-{number:05d}"
+    
 
 
-def generate_walkin_cart_number():
+def generate_walkin_order_number(shop):
 
     today = timezone.localdate()
 
-    prefix = today.strftime(
-        "RT-W-%m%d"
+    prefix = today.strftime("%m%d")
+
+    last = (
+        Order.objects.filter(
+            shop=shop,
+            order_type="walkin",
+            ordered_at__date=today,
+        )
+        .order_by("-id")
+        .first()
     )
 
-    count = (
+    number = 1
+
+    if last:
+        try:
+            number = int(last.order_number.split("-")[-1]) + 1
+        except Exception:
+            pass
+
+    return f"{shop.shop_code}-WO-{prefix}-{number:05d}"
+
+
+def generate_walkin_cart_number(shop):
+
+    today = timezone.localdate()
+
+    prefix = today.strftime("%m%d")
+
+    last = (
         WalkInCart.objects.filter(
-            created_at__date=today
-        ).count()
-        + 1
+            shop=shop,
+            created_at__date=today,
+        )
+        .order_by("-id")
+        .first()
     )
 
-    return (
-        f"{prefix}-{count:05d}"
-    )
+    number = 1
+
+    if last:
+        try:
+            number = int(last.cart_number.split("-")[-1]) + 1
+        except Exception:
+            pass
+
+    return f"{shop.shop_code}-W-{prefix}-{number:05d}"

@@ -6,6 +6,13 @@ class Shop(models.Model):
     name = models.CharField(
         max_length=255
     )
+    
+    shop_code = models.CharField(
+        max_length=10,
+        unique=True,
+        blank=True,
+        null=True
+    )
 
     logo = models.ImageField(
         upload_to="shops/logos/",
@@ -75,6 +82,18 @@ class Shop(models.Model):
 
     def __str__(self):
         return self.name
+    
+    def save(self, *args, **kwargs):
+
+        creating = self.pk is None
+
+        super().save(*args, **kwargs)
+
+        if creating and not self.shop_code:
+
+            self.shop_code = f"RT{self.id}"
+
+            super().save(update_fields=["shop_code"])
     
 
 class ShopMenuItem(models.Model):

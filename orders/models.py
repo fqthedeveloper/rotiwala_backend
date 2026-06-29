@@ -23,8 +23,13 @@ class Order(models.Model):
     )
 
     PAYMENT_STATUS = (
-        ("pending", "Pending"),
+        ("unpaid", "Unpaid"),
         ("paid", "Paid"),
+    )
+    
+    PICKUP_TYPES = (
+        ("instant", "Prepare Immediately"),
+        ("scheduled", "Scheduled Pickup"),
     )
 
     order_number = models.CharField(
@@ -53,7 +58,13 @@ class Order(models.Model):
     payment_status = models.CharField(
         max_length=20,
         choices=PAYMENT_STATUS,
-        default="pending"
+        default="unpaid"
+    )
+    
+    pickup_type = models.CharField(
+        max_length=20,
+        choices=PICKUP_TYPES,
+        default="instant",
     )
 
     pickup_time = models.DateTimeField(
@@ -74,6 +85,11 @@ class Order(models.Model):
         max_length=20,
         choices=STATUS_CHOICES,
         default="pending"
+    )
+    
+    paid_at = models.DateTimeField(
+        null=True,
+        blank=True
     )
 
     customer_name = models.CharField(
@@ -147,9 +163,21 @@ class Order(models.Model):
     pickup_by_other_person = models.BooleanField(
         default=False
     )
+    
 
     def __str__(self):
         return self.order_number
+    
+    @property
+    def is_paid(self):
+        return self.payment_status == "paid"
+
+
+    @property
+    def payment_badge(self):
+        if self.payment_status == "paid":
+            return "Paid"
+        return "Unpaid"
 
 
 class OrderItem(models.Model):
@@ -191,6 +219,11 @@ class WalkInCart(models.Model):
         ("placed", "Placed"),
         ("cancelled", "Cancelled"),
     )
+    
+    PAYMENT_STATUS = (
+        ("unpaid", "Unpaid"),
+        ("paid", "Paid"),
+    )
 
     cart_number = models.CharField(
         max_length=30,
@@ -231,6 +264,12 @@ class WalkInCart(models.Model):
         max_length=20,
         choices=Order.PAYMENT_METHODS,
         default="cash"
+    )
+    
+    payment_status = models.CharField(
+        max_length=20,
+        choices=Order.PAYMENT_STATUS,
+        default="unpaid"
     )
 
     total_amount = models.DecimalField(

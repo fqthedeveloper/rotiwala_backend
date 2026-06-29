@@ -7,6 +7,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from decimal import Decimal
+from django.db import IntegrityError
+from django.utils.dateparse import parse_datetime
 
 
 from accounts.models import (
@@ -42,14 +44,14 @@ from .websocket import (
 )
 
 from .utils import (
-    generate_order_number,
-    generate_walkin_cart_number
+    generate_online_order_number,
+    generate_walkin_cart_number,
+    generate_walkin_order_number,    
 )
 
 from menu.models import (
     MenuItem
 )
-
 
 
 
@@ -112,6 +114,15 @@ class PlaceOrderView(APIView):
             "payment_method",
             "cash"
         )
+        
+        pickup_type = request.data.get(
+            "pickup_type",
+            "instant"
+        )
+
+        pickup_time = request.data.get(
+            "pickup_time"
+        )
 
         notes = request.data.get(
             "notes",
@@ -156,6 +167,61 @@ class PlaceOrderView(APIView):
                     },
                     status=400
                 ),
+        
+        if pickup_type not in [
+            "instant",
+            "scheduled"
+        ]:
+
+            return Response(
+                {
+                    "error": "Invalid pickup type."
+                },
+                status=400
+            )
+
+
+        parsed_pickup_time = None
+
+
+        if pickup_type == "scheduled":
+
+            if not pickup_time:
+
+                return Response(
+                    {
+                        "error": "Pickup time is required."
+                    },
+                    status=400
+                )
+
+            parsed_pickup_time = parse_datetime(
+                pickup_time
+            )
+
+            if not parsed_pickup_time:
+
+                return Response(
+                    {
+                        "error": "Invalid pickup time."
+                    },
+                    status=400
+                )
+
+            if timezone.is_naive(parsed_pickup_time):
+
+                parsed_pickup_time = timezone.make_aware(
+                    parsed_pickup_time
+                )
+
+            if parsed_pickup_time <= timezone.now():
+
+                return Response(
+                    {
+                        "error": "Pickup time must be in the future."
+                    },
+                    status=400
+                )
                 
         active_orders = Order.objects.filter(
             shop=shop,
@@ -176,17 +242,23 @@ class PlaceOrderView(APIView):
         if active_orders >= 15:
             estimated_minutes = 30
 
-        estimated_ready_time = (
-            timezone.now() +
-            timedelta(
-                minutes=estimated_minutes
+        if pickup_type == "instant":
+
+            estimated_ready_time = (
+                timezone.now() +
+                timedelta(
+                    minutes=estimated_minutes
+                )
             )
-        )
+
+        else:
+
+            estimated_ready_time = parsed_pickup_time
 
         order = Order.objects.create(
 
             order_number=
-            generate_order_number(),
+            generate_online_order_number(shop),
 
             customer=request.user,
 
@@ -198,27 +270,25 @@ class PlaceOrderView(APIView):
                 or request.user.phone
             ),
 
-            customer_phone=
-            request.user.phone,
+            customer_phone=request.user.phone,
 
-            payment_method=
-            payment_method,
+            payment_method=payment_method,
 
-            payment_status=
-            "pending",
+            payment_status="unpaid",
 
-            order_type=
-            "online",
+            order_type="online",
+
+            pickup_type=pickup_type,
+
+            pickup_time=parsed_pickup_time,
 
             notes=notes,
 
             status="pending",
 
-            estimated_minutes=
-            estimated_minutes,
+            estimated_minutes=estimated_minutes,
 
-            estimated_ready_time=
-            estimated_ready_time,
+            estimated_ready_time=estimated_ready_time,
 
             pickup_by_other_person=
             pickup_by_other_person,
@@ -311,13 +381,17 @@ class PlaceOrderView(APIView):
 
             "total_amount": order.total_amount,
 
-            "estimated_minutes": estimated_minutes,
+            "pickup_type": order.pickup_type,
 
-            "estimated_ready_time": estimated_ready_time,
+            "pickup_time": order.pickup_time,
+
+            "estimated_minutes": order.estimated_minutes,
+
+            "estimated_ready_time": order.estimated_ready_time,
 
             "queue_count": active_orders
 
-        })        
+        }) 
     
 
 
@@ -542,16 +616,6 @@ class CollectedOrderView(APIView):
         order.save()
         send_order_update(order)
 
-        if order.customer:
-
-            profile = CustomerProfile.objects.get(
-                user=order.customer
-            )
-
-            profile.total_completed_orders += 1
-            profile.trust_score += 1
-            profile.save()
-
         if (
             order.customer and
             order.customer.fcm_token
@@ -621,26 +685,128 @@ class CancelOrderView(APIView):
             }
         )
 
+
+
 class PaymentReceivedView(APIView):
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
 
-        order = Order.objects.get(
-            id=pk
-        )
+        if request.user.role != "manager":
+
+            return Response(
+                {
+                    "error": "Permission denied"
+                },
+                status=403
+            )
+
+        try:
+
+            shop = request.user.manager_profile.shop
+
+        except Exception:
+
+            return Response(
+                {
+                    "error": "Manager shop not assigned"
+                },
+                status=400
+            )
+
+        try:
+
+            order = Order.objects.get(
+
+                id=pk,
+
+                shop=shop
+
+            )
+
+        except Order.DoesNotExist:
+
+            return Response(
+                {
+                    "error": "Order not found"
+                },
+                status=404
+            )
+
+        # ----------------------------------
+        # Already Paid
+        # ----------------------------------
+
+        if order.payment_status == "paid":
+
+            return Response(
+                {
+                    "error": "Payment has already been received."
+                },
+                status=400
+            )
+
+        # ----------------------------------
+        # Receive Payment
+        # ----------------------------------
 
         order.payment_status = "paid"
 
-        order.save()
+        order.paid_at = timezone.now()
+
+        order.save(
+            update_fields=[
+                "payment_status",
+                "paid_at",
+            ]
+        )
+
+        # ----------------------------------
+        # Notify WebSocket
+        # ----------------------------------
+
         send_order_update(order)
 
-        return Response(
-            {
-                "message": "Payment Received"
-            }
-        )
+        # ----------------------------------
+        # Notify Customer
+        # ----------------------------------
+
+        if (
+            order.customer and
+            order.customer.fcm_token
+        ):
+
+            send_push_notification(
+
+                token=order.customer.fcm_token,
+
+                title="Payment Received",
+
+                body=(
+                    f"Payment received for "
+                    f"Order #{order.order_number}"
+                ),
+
+                data={
+                    "type": "payment",
+                    "status": "paid",
+                    "order_id": str(order.id),
+                }
+
+            )
+
+        serializer = OrderSerializer(order)
+
+        return Response({
+
+            "success": True,
+
+            "message": "Payment received successfully.",
+
+            "order": serializer.data
+
+        })
 
 
 
@@ -1006,16 +1172,17 @@ def get_or_create_customer(phone, name):
 
         return customer
     
-
-# ==========================================
-# CREATE WALK-IN CART
-# ==========================================
-
+    
+    
 class CreateWalkInCartView(APIView):
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+
+        # ------------------------------------
+        # Permission
+        # ------------------------------------
 
         if request.user.role != "manager":
 
@@ -1025,6 +1192,10 @@ class CreateWalkInCartView(APIView):
                 },
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # ------------------------------------
+        # Manager Shop
+        # ------------------------------------
 
         try:
 
@@ -1039,20 +1210,22 @@ class CreateWalkInCartView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # ------------------------------------
+        # Request Data
+        # ------------------------------------
+
         customer_name = (
             request.data.get(
                 "customer_name",
-                ""
-            )
-            .strip()
+                "Walk-In Customer"
+            ).strip()
         )
 
         customer_phone = (
             request.data.get(
                 "customer_phone",
                 ""
-            )
-            .strip()
+            ).strip()
         )
 
         payment_method = request.data.get(
@@ -1060,10 +1233,37 @@ class CreateWalkInCartView(APIView):
             "cash"
         )
 
+        payment_status = request.data.get(
+            "payment_status",
+            "unpaid"
+        )
+
         notes = request.data.get(
             "notes",
             ""
         )
+
+        # ------------------------------------
+        # Validate Payment Method
+        # ------------------------------------
+
+        if payment_method not in [
+            "cash",
+            "upi",
+        ]:
+
+            payment_method = "cash"
+
+        # ------------------------------------
+        # Validate Payment Status
+        # ------------------------------------
+
+        if payment_status not in [
+            "paid",
+            "unpaid",
+        ]:
+
+            payment_status = "unpaid"
 
         # ------------------------------------
         # Normalize Phone
@@ -1090,44 +1290,70 @@ class CreateWalkInCartView(APIView):
                 customer_phone = "+91" + customer_phone
 
         # ------------------------------------
-        # DO NOT CREATE CUSTOMER HERE
-        # Customer will be created only
-        # when the order is placed.
+        # Create Draft Cart
+        # Retry if duplicate cart number
         # ------------------------------------
 
-        cart = WalkInCart.objects.create(
+        retries = 10
 
-            cart_number=generate_walkin_cart_number(),
+        while retries > 0:
 
-            manager=request.user,
+            try:
 
-            shop=shop,
+                cart = WalkInCart.objects.create(
 
-            customer=None,
+                    cart_number=generate_walkin_cart_number(shop),
 
-            customer_name=customer_name,
+                    manager=request.user,
 
-            customer_phone=customer_phone,
+                    shop=shop,
 
-            payment_method=payment_method,
+                    customer=None,
 
-            notes=notes,
+                    customer_name=customer_name,
 
-            status="draft",
+                    customer_phone=customer_phone,
 
-            total_amount=Decimal("0.00")
+                    payment_method=payment_method,
 
-        )
+                    payment_status=payment_status,
 
-        serializer = WalkInCartSerializer(cart)
+                    notes=notes,
+
+                    status="draft",
+
+                    total_amount=Decimal("0.00")
+
+                )
+
+                serializer = WalkInCartSerializer(cart)
+
+                return Response(
+
+                    serializer.data,
+
+                    status=status.HTTP_201_CREATED
+
+                )
+
+            except IntegrityError:
+
+                retries -= 1
+
+        # ------------------------------------
+        # Failed after retries
+        # ------------------------------------
 
         return Response(
 
-            serializer.data,
+            {
+                "error": "Unable to generate a unique cart number. Please try again."
+            },
 
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
 
         )
+        
         
 class WalkInCartListView(APIView):
 
@@ -1447,6 +1673,10 @@ class UpdateWalkInCartView(APIView):
 
     def patch(self, request, pk):
 
+        # --------------------------------------
+        # Manager Permission
+        # --------------------------------------
+
         if request.user.role != "manager":
 
             return Response(
@@ -1455,6 +1685,10 @@ class UpdateWalkInCartView(APIView):
                 },
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # --------------------------------------
+        # Get Draft Cart
+        # --------------------------------------
 
         try:
 
@@ -1473,16 +1707,16 @@ class UpdateWalkInCartView(APIView):
             return Response(
 
                 {
-                    "error": "Cart not found"
+                    "error": "Draft cart not found"
                 },
 
                 status=status.HTTP_404_NOT_FOUND
 
             )
 
-        # -------------------------------------
-        # Customer Name
-        # -------------------------------------
+        # --------------------------------------
+        # Read Request Data
+        # --------------------------------------
 
         customer_name = request.data.get(
 
@@ -1490,11 +1724,7 @@ class UpdateWalkInCartView(APIView):
 
             cart.customer_name
 
-        ).strip()
-
-        # -------------------------------------
-        # Customer Phone
-        # -------------------------------------
+        )
 
         customer_phone = request.data.get(
 
@@ -1502,18 +1732,42 @@ class UpdateWalkInCartView(APIView):
 
             cart.customer_phone
 
-        ).strip()
+        )
+
+        payment_method = request.data.get(
+
+            "payment_method",
+
+            cart.payment_method
+
+        )
+
+        payment_status = request.data.get(
+
+            "payment_status",
+
+            cart.payment_status
+
+        )
+
+        notes = request.data.get(
+
+            "notes",
+
+            cart.notes
+
+        )
+
+        # --------------------------------------
+        # Normalize Phone Number
+        # --------------------------------------
 
         if customer_phone:
 
             customer_phone = (
-
                 customer_phone
-
                 .replace(" ", "")
-
                 .replace("-", "")
-
             )
 
             if customer_phone.startswith("+91"):
@@ -1528,60 +1782,37 @@ class UpdateWalkInCartView(APIView):
 
                 customer_phone = "+91" + customer_phone
 
-        # -------------------------------------
-        # Payment Method
-        # -------------------------------------
+        # --------------------------------------
+        # Validate Payment Method
+        # --------------------------------------
 
-        payment_method = request.data.get(
+        if payment_method not in [
 
-            "payment_method",
+            "cash",
 
-            cart.payment_method
+            "upi",
 
-        )
+        ]:
 
-        # -------------------------------------
-        # Notes
-        # -------------------------------------
+            payment_method = "cash"
 
-        notes = request.data.get(
+        # --------------------------------------
+        # Validate Payment Status
+        # --------------------------------------
 
-            "notes",
+        if payment_status not in [
 
-            cart.notes
+            "paid",
 
-        )
+            "unpaid",
 
-        # -------------------------------------
-        # Search Existing Customer Only
-        # DO NOT CREATE CUSTOMER
-        # -------------------------------------
+        ]:
 
-        customer = None
-
-        if customer_phone:
-
-            customer = User.objects.filter(
-
-                role="customer",
-
-                phone__in=[
-
-                    customer_phone,
-
-                    customer_phone.replace("+91", ""),
-
-                    customer_phone.replace("+91", "91"),
-
-                ]
-
-            ).first()
-
-        # -------------------------------------
-        # Update Draft
-        # -------------------------------------
-
-        cart.customer = customer
+            payment_status = "unpaid"
+        
+                # --------------------------------------
+        # Update Cart
+        # --------------------------------------
 
         cart.customer_name = customer_name
 
@@ -1589,38 +1820,33 @@ class UpdateWalkInCartView(APIView):
 
         cart.payment_method = payment_method
 
+        cart.payment_status = payment_status
+
         cart.notes = notes
 
-        cart.save(
+        cart.save()
 
-            update_fields=[
-
-                "customer",
-
-                "customer_name",
-
-                "customer_phone",
-
-                "payment_method",
-
-                "notes",
-
-                "updated_at",
-
-            ]
-
-        )
+        # --------------------------------------
+        # Return Updated Cart
+        # --------------------------------------
 
         serializer = WalkInCartSerializer(cart)
 
         return Response(
 
-            serializer.data,
+            {
+                "success": True,
+
+                "message": "Draft cart updated successfully.",
+
+                "cart": serializer.data
+
+            },
 
             status=status.HTTP_200_OK
 
-        )
-      
+        )     
+
       
 class PlaceWalkInCartView(APIView):
 
@@ -1667,10 +1893,42 @@ class PlaceWalkInCartView(APIView):
                 status=400
             )
 
+        # -----------------------------------
+        # Payment Status
+        # -----------------------------------
+
+        payment_status = request.data.get(
+            "payment_status",
+            "unpaid"
+        )
+
+        if payment_status not in [
+            "paid",
+            "unpaid"
+        ]:
+            payment_status = "unpaid"
+
+            return Response(
+                {
+                    "error": "Invalid payment status"
+                },
+                status=400
+            )
+
+        paid_at = None
+
+        if payment_status == "paid":
+
+            paid_at = timezone.now()
+
+        # -----------------------------------
+        # Create Order
+        # -----------------------------------
+
         order = Order.objects.create(
 
             order_number=
-            generate_walkin_cart_number(),
+            generate_walkin_order_number(cart.shop),
 
             customer=
             cart.customer,
@@ -1682,7 +1940,10 @@ class PlaceWalkInCartView(APIView):
             cart.payment_method,
 
             payment_status=
-            "paid",
+            payment_status,
+
+            paid_at=
+            paid_at,
 
             order_type=
             "walkin",
@@ -1707,6 +1968,10 @@ class PlaceWalkInCartView(APIView):
 
         )
 
+        # -----------------------------------
+        # Copy Items
+        # -----------------------------------
+
         for item in cart.items.all():
 
             OrderItem.objects.create(
@@ -1727,6 +1992,10 @@ class PlaceWalkInCartView(APIView):
 
             )
 
+        # -----------------------------------
+        # Customer Profile
+        # -----------------------------------
+
         if order.customer:
 
             profile, created = CustomerProfile.objects.get_or_create(
@@ -1736,6 +2005,16 @@ class PlaceWalkInCartView(APIView):
             profile.total_orders += 1
 
             profile.save()
+
+        # -----------------------------------
+        # Notify Frontend
+        # -----------------------------------
+
+        send_order_update(order)
+
+        # -----------------------------------
+        # Mark Draft Completed
+        # -----------------------------------
 
         cart.status = "placed"
 
@@ -1749,11 +2028,12 @@ class PlaceWalkInCartView(APIView):
 
             "success": True,
 
-            "message": "Walk-In Order Created",
+            "message": "Walk-In Order Created Successfully",
 
             "order": serializer.data
 
-        })
+        })       
+        
         
 def update_order_total(order):
 
