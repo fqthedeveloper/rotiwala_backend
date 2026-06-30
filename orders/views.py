@@ -981,21 +981,14 @@ class CustomerSearchView(APIView):
             }
 
         )
-
+        
         return Response({
-
             "found": True,
-
             "id": customer.id,
-
-            "name": customer.first_name or customer.username,
-
+            "name": f"{customer.first_name} {customer.last_name}",
             "phone": customer.phone,
-
             "trust_score": profile.trust_score,
-
             "total_orders": profile.total_orders,
-
         })
         
         
