@@ -46,7 +46,7 @@ class CartItem(models.Model):
 
     @property
     def total_price(self):
-        return self.menu_item.price * self.quantity
+        return self.menu_item.base_price * self.quantity
 
     def __str__(self):
         return self.menu_item.name

@@ -134,6 +134,17 @@ class WalkInCartSerializer(serializers.ModelSerializer):
 
     total_items = serializers.SerializerMethodField()
 
+    # ✅ Add shop_id and shop_name
+    shop_id = serializers.IntegerField(
+        source='shop.id',
+        read_only=True
+    )
+
+    shop_name = serializers.CharField(
+        source='shop.name',
+        read_only=True
+    )
+
     class Meta:
 
         model = WalkInCart
@@ -167,6 +178,10 @@ class WalkInCartSerializer(serializers.ModelSerializer):
             "updated_at",
 
             "items",
+
+            "shop_id",      # ✅ added
+
+            "shop_name",    # ✅ added
 
         ]
 

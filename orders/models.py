@@ -31,6 +31,12 @@ class Order(models.Model):
         ("instant", "Prepare Immediately"),
         ("scheduled", "Scheduled Pickup"),
     )
+    
+    PROMOTION_TYPES = (
+        ("none", "None"),
+        ("discount", "Discount"),
+        ("coupon", "Coupon"),
+    )
 
     order_number = models.CharField(
         max_length=30,
@@ -60,6 +66,13 @@ class Order(models.Model):
         choices=PAYMENT_STATUS,
         default="unpaid"
     )
+    
+    promotion_type = models.CharField(
+        max_length=20,
+        choices=PROMOTION_TYPES,
+        default="none"
+    )
+    
     
     pickup_type = models.CharField(
         max_length=20,
@@ -108,6 +121,40 @@ class Order(models.Model):
         max_digits=12,
         decimal_places=2,
         default=0
+    )
+    
+    original_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0
+    )
+
+    discount_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0
+    )
+
+    discount = models.ForeignKey(
+        "discounts.Discount",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders"
+    )
+
+    discount_name = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True
+    )
+
+    coupon = models.ForeignKey(
+        "discounts.Coupon",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders"
     )
 
     notes = models.TextField(
@@ -188,11 +235,36 @@ class OrderItem(models.Model):
         related_name="items"
     )
 
+    menu_item = models.ForeignKey(
+        MenuItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
+    discount = models.ForeignKey(
+        "discounts.Discount",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
     item_name = models.CharField(
         max_length=255
     )
 
-    item_price = models.DecimalField(
+    original_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    discount_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0
+    )
+
+    final_price = models.DecimalField(
         max_digits=10,
         decimal_places=2
     )
@@ -202,6 +274,25 @@ class OrderItem(models.Model):
     total_price = models.DecimalField(
         max_digits=12,
         decimal_places=2
+    )
+
+    discount_name = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True
+    )
+
+    discount_percentage = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+    
+    promotion_type = models.CharField(
+        max_length=20,
+        choices=Order.PROMOTION_TYPES,
+        default="none"
     )
 
     def __str__(self):

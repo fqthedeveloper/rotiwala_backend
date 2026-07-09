@@ -56,6 +56,18 @@ urlpatterns = [
         "api/contact/",
         include("contact.urls")
     ),
+    
+    path(
+        "api/discounts/",
+        include("discounts.urls")
+    ),
+    
+    path(
+        "api/coupons/",
+        include(
+            "discounts.coupon_urls"
+        )
+    ),
 
     ]
 

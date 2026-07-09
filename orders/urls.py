@@ -2,6 +2,13 @@ from django.urls import path
 
 from .views import *
 
+from .views import (
+    GenerateReceiptView,
+    PrintReceiptView,
+    BulkPrintReceiptsView
+)
+
+
 urlpatterns = [
 
     path(
@@ -49,6 +56,10 @@ urlpatterns = [
         CancelOrderView.as_view()
     ),
     
+    path('available-promotions/', AvailablePromotionsView.as_view(), name='available-promotions'),
+
+    path('checkout/preview/', CheckoutPreviewView.as_view(), name='checkout-preview'),
+        
     path(
         "dashboard/",
         ManagerDashboardView.as_view()
@@ -63,6 +74,8 @@ urlpatterns = [
         "<int:pk>/payment/",
         PaymentReceivedView.as_view()
     ),
+    
+    
     
     path(
         "customer-search/",
@@ -128,4 +141,8 @@ urlpatterns = [
         "walkin/order/item/<int:pk>/delete/",
         DeletePlacedOrderItemView.as_view()
     ),
+    
+    path('receipt/<int:pk>/', GenerateReceiptView.as_view(), name='generate-receipt'),
+    path('receipt/<int:pk>/print/', PrintReceiptView.as_view(), name='print-receipt'),
+    path('receipt/bulk-print/', BulkPrintReceiptsView.as_view(), name='bulk-print-receipts'),
 ]

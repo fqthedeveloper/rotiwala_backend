@@ -53,313 +53,252 @@ from menu.models import (
     MenuItem
 )
 
+from .models import Order, OrderItem
+from .serializers import OrderSerializer
+from .utils import generate_online_order_number
+from django.db import transaction
+from discounts.offer_engine import OfferEngine                          # <-- import OfferEngine
+from discounts.models import Discount, DiscountUsage                # <-- for usage tracking
+from discounts.coupon_models import CouponUsage            # <-- for coupon usage
 
 
 class PlaceOrderView(APIView):
-
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request):
-
+        # ============================================
+        # 1. Validate basic inputs
+        # ============================================
         shop_id = request.data.get("shop_id")
-
         if not shop_id:
-            return Response(
-                {
-                    "error": "Shop ID required"
-                },
-                status=400
-            )
+            return Response({"error": "Shop ID required"}, status=400)
 
         try:
-            shop = Shop.objects.get(
-                id=shop_id,
-                is_active=True
-            )
-
+            shop = Shop.objects.get(id=shop_id, is_active=True)
         except Shop.DoesNotExist:
-            return Response(
-                {
-                    "error": "Shop not found"
-                },
-                status=404
-            )
+            return Response({"error": "Shop not found"}, status=404)
 
         try:
-            cart = Cart.objects.get(
-                customer=request.user
-            )
-
+            cart = Cart.objects.get(customer=request.user)
         except Cart.DoesNotExist:
-            return Response(
-                {
-                    "error": "Cart not found"
-                },
-                status=400
-            )
+            return Response({"error": "Cart not found"}, status=400)
 
-        cart_items = CartItem.objects.filter(
-            cart=cart
-        )
-
+        cart_items = CartItem.objects.filter(cart=cart)
         if not cart_items.exists():
-            return Response(
-                {
-                    "error": "Cart Empty"
-                },
-                status=400
-            )
+            return Response({"error": "Cart Empty"}, status=400)
 
-        payment_method = request.data.get(
-            "payment_method",
-            "cash"
-        )
-        
-        pickup_type = request.data.get(
-            "pickup_type",
-            "instant"
-        )
+        # -------------------------------------------
+        # Payment & pickup
+        # -------------------------------------------
+        payment_method = request.data.get("payment_method", "cash")
+        pickup_type = request.data.get("pickup_type", "instant")
+        pickup_time = request.data.get("pickup_time")
+        notes = request.data.get("notes", "")
 
-        pickup_time = request.data.get(
-            "pickup_time"
-        )
-
-        notes = request.data.get(
-            "notes",
-            ""
-        )
-
-        pickup_by_other_person = request.data.get(
-            "pickup_by_other_person",
-            False
-        )
-
-        pickup_person_name = request.data.get(
-            "pickup_person_name",
-            ""
-        )
-
-        pickup_person_phone = request.data.get(
-            "pickup_person_phone",
-            ""
-        )
-
-        # Validate only when another person collects
+        pickup_by_other_person = request.data.get("pickup_by_other_person", False)
+        pickup_person_name = request.data.get("pickup_person_name", "")
+        pickup_person_phone = request.data.get("pickup_person_phone", "")
 
         if pickup_by_other_person:
-
             if not pickup_person_name:
-
-                return Response(
-                    {
-                        "error":
-                        "Pickup person name is required"
-                    },
-                    status=400
-                ),
-
+                return Response({"error": "Pickup person name is required"}, status=400)
             if not pickup_person_phone:
+                return Response({"error": "Pickup person phone is required"}, status=400)
 
-                return Response(
-                    {
-                        "error":
-                        "Pickup person phone is required"
-                    },
-                    status=400
-                ),
-        
-        if pickup_type not in [
-            "instant",
-            "scheduled"
-        ]:
-
-            return Response(
-                {
-                    "error": "Invalid pickup type."
-                },
-                status=400
-            )
-
+        if pickup_type not in ("instant", "scheduled"):
+            return Response({"error": "Invalid pickup type."}, status=400)
 
         parsed_pickup_time = None
-
-
         if pickup_type == "scheduled":
-
             if not pickup_time:
-
-                return Response(
-                    {
-                        "error": "Pickup time is required."
-                    },
-                    status=400
-                )
-
-            parsed_pickup_time = parse_datetime(
-                pickup_time
-            )
-
+                return Response({"error": "Pickup time is required."}, status=400)
+            parsed_pickup_time = parse_datetime(pickup_time)
             if not parsed_pickup_time:
-
-                return Response(
-                    {
-                        "error": "Invalid pickup time."
-                    },
-                    status=400
-                )
-
+                return Response({"error": "Invalid pickup time."}, status=400)
             if timezone.is_naive(parsed_pickup_time):
-
-                parsed_pickup_time = timezone.make_aware(
-                    parsed_pickup_time
-                )
-
+                parsed_pickup_time = timezone.make_aware(parsed_pickup_time)
             if parsed_pickup_time <= timezone.now():
+                return Response({"error": "Pickup time must be in the future."}, status=400)
 
-                return Response(
-                    {
-                        "error": "Pickup time must be in the future."
-                    },
-                    status=400
-                )
-                
+        # -------------------------------------------
+        # Determine selected promotion
+        # -------------------------------------------
+        promotion_type = request.data.get("promotion_type")
+        promotion_id = request.data.get("promotion_id")
+        coupon_code = request.data.get("coupon_code")
+
+        selected_discount = None
+        selected_coupon = None
+
+        if promotion_type == "discount" and promotion_id:
+            try:
+                selected_discount = Discount.objects.get(id=promotion_id, is_active=True)
+            except Discount.DoesNotExist:
+                return Response({"error": "Discount not found"}, status=400)
+        elif promotion_type == "coupon" and coupon_code:
+            try:
+                selected_coupon = Coupon.objects.get(code=coupon_code, status='active')
+            except Coupon.DoesNotExist:
+                return Response({"error": "Coupon not found"}, status=400)
+
+        # ============================================
+        # 2. Estimate preparation time
+        # ============================================
         active_orders = Order.objects.filter(
-            shop=shop,
-            status__in=[
-                "accepted",
-                "preparing"
-            ]
+            shop=shop, status__in=["accepted", "preparing"]
         ).count()
 
-        estimated_minutes = 10
-
+        estimated_minutes = 20
         if active_orders >= 5:
-            estimated_minutes = 15
-
+            estimated_minutes = 25
         if active_orders >= 10:
-            estimated_minutes = 20
-
-        if active_orders >= 15:
             estimated_minutes = 30
+        if active_orders >= 15:
+            estimated_minutes = 35
 
         if pickup_type == "instant":
-
-            estimated_ready_time = (
-                timezone.now() +
-                timedelta(
-                    minutes=estimated_minutes
-                )
-            )
-
+            estimated_ready_time = timezone.now() + timedelta(minutes=estimated_minutes)
         else:
-
             estimated_ready_time = parsed_pickup_time
 
+        # ============================================
+        # 3. Create the order skeleton
+        # ============================================
         order = Order.objects.create(
-
-            order_number=
-            generate_online_order_number(shop),
-
+            order_number=generate_online_order_number(shop),
             customer=request.user,
-
             shop=shop,
-
-            customer_name=(
-                request.user.get_full_name()
-                or request.user.username
-                or request.user.phone
-            ),
-
+            customer_name=request.user.get_full_name() or request.user.username or request.user.phone,
             customer_phone=request.user.phone,
-
             payment_method=payment_method,
-
             payment_status="unpaid",
-
             order_type="online",
-
             pickup_type=pickup_type,
-
             pickup_time=parsed_pickup_time,
-
             notes=notes,
-
             status="pending",
-
             estimated_minutes=estimated_minutes,
-
             estimated_ready_time=estimated_ready_time,
-
-            pickup_by_other_person=
-            pickup_by_other_person,
-
-            pickup_person_name=
-            pickup_person_name,
-
-            pickup_person_phone=
-            pickup_person_phone,
+            pickup_by_other_person=pickup_by_other_person,
+            pickup_person_name=pickup_person_name,
+            pickup_person_phone=pickup_person_phone,
         )
 
-        total_amount = 0
+        # ============================================
+        # 4. Process the cart with OfferEngine (rounding applied)
+        # ============================================
+        engine = OfferEngine(
+            customer=request.user,
+            shop=shop,
+            coupon_code=coupon_code if selected_coupon else None,
+            forced_discount=selected_discount,
+        )
 
-        for item in cart_items:
+        # Get the full cart calculation (includes rounded totals and adjusted item discounts)
+        cart_result = engine.calculate_cart(cart_items)
 
-            line_total = (
-                item.menu_item.base_price *
-                item.quantity
-            )
+        # Use the rounded/aggregated totals
+        original_amount = cart_result["original_total"]
+        discount_amount = cart_result["discount_total"]
+        final_amount = cart_result["final_total"]
 
+        # Create order items using the adjusted discounts from the cart result
+        for item_result in cart_result["items"]:
+            offer = item_result["offer"]
+            cart_item = item_result["item"]
             OrderItem.objects.create(
-
                 order=order,
-
-                item_name=item.menu_item.name,
-
-                item_price=item.menu_item.base_price,
-
-                quantity=item.quantity,
-
-                total_price=line_total
+                menu_item=cart_item.menu_item,
+                discount=offer.discount,
+                item_name=cart_item.menu_item.name,
+                original_price=offer.original_price,
+                discount_amount=offer.discount_amount,   # already adjusted proportionally
+                final_price=offer.final_price,           # adjusted
+                quantity=cart_item.quantity,
+                total_price=offer.final_price,           # total price per item (already multiplied by quantity)
+                discount_name=offer.discount_name,
+                discount_percentage=offer.discount_value if offer.discount_type == "percentage" else None,
+                promotion_type=offer.promotion_type,
             )
 
-            total_amount += line_total
+        # ============================================
+        # 5. Save totals & promotion info on the order
+        # ============================================
+        order.original_amount = original_amount
+        order.discount_amount = discount_amount
+        order.total_amount = final_amount
+        order.discount = selected_discount
+        order.coupon = selected_coupon
 
-        order.total_amount = total_amount
+        if selected_discount:
+            order.promotion_type = "discount"
+            order.discount_name = selected_discount.name
+        elif selected_coupon:
+            order.promotion_type = "coupon"
+            # optionally add coupon code field if you have one
+        else:
+            order.promotion_type = "none"
 
         order.save()
 
-        profile, created = (
-            CustomerProfile.objects
-            .get_or_create(
-                user=request.user
-            )
-        )
+        # ============================================
+        # 6. Record usage (one‑time per customer)
+        # ============================================
+        if selected_discount:
+            try:
+                DiscountUsage.objects.create(
+                    discount=selected_discount,
+                    shop=shop,
+                    order=order,
+                    customer=request.user,
+                    order_type="online",
+                    discount_type=selected_discount.discount_type,
+                    discount_value=selected_discount.value,
+                    original_amount=original_amount,
+                    discount_amount=discount_amount,
+                    final_amount=final_amount,
+                    quantity=cart_items.count(),
+                )
+            except IntegrityError:
+                pass
 
+        if selected_coupon:
+            try:
+                CouponUsage.objects.create(
+                    coupon=selected_coupon,
+                    customer=request.user,
+                    shop=shop,
+                    order=order,
+                    order_type="online",
+                    original_amount=original_amount,
+                    discount_amount=discount_amount,
+                    final_amount=final_amount,
+                    quantity=cart_items.count(),
+                )
+            except IntegrityError:
+                pass
+
+        # ============================================
+        # 7. Update customer stats
+        # ============================================
+        profile, created = CustomerProfile.objects.get_or_create(user=request.user)
         profile.total_orders += 1
-
         profile.save()
 
+        # ============================================
+        # 8. Notify the shop manager
+        # ============================================
         manager = User.objects.filter(
-
             role="manager",
-
             manager_profile__shop=shop
-
         ).first()
 
         if manager and manager.fcm_token:
-
             send_push_notification(
-
                 token=manager.fcm_token,
-
                 title="🔥 New Order Received",
-
-                body=(
-                    f"Order #{order.order_number} "
-                    f"₹{order.total_amount}"
-                ),
-
+                body=f"Order #{order.order_number} ₹{order.total_amount}",
                 data={
                     "type": "new_order",
                     "order_id": str(order.id),
@@ -367,33 +306,24 @@ class PlaceOrderView(APIView):
                 }
             )
 
+        # ============================================
+        # 9. Clear the cart
+        # ============================================
         cart_items.delete()
 
         return Response({
-
             "success": True,
-
             "message": "Order Placed Successfully",
-
             "order_id": order.id,
-
             "order_number": order.order_number,
-
             "total_amount": order.total_amount,
-
             "pickup_type": order.pickup_type,
-
             "pickup_time": order.pickup_time,
-
             "estimated_minutes": order.estimated_minutes,
-
             "estimated_ready_time": order.estimated_ready_time,
-
-            "queue_count": active_orders
-
-        }) 
-    
-
+            "queue_count": active_orders,
+        })
+                
 
 class ManagerOrdersView(APIView):
 
@@ -933,8 +863,7 @@ class CustomerSearchView(APIView):
 
         phone = self.normalize_phone(phone)
 
-        if not phone:
-
+        if not phone or len(phone) != 10:
             return Response({
                 "found": False
             })
@@ -1840,192 +1769,216 @@ class UpdateWalkInCartView(APIView):
 
         )     
 
-      
-class PlaceWalkInCartView(APIView):
 
+class PlaceWalkInCartView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
+        # 1. Only managers or super admins can place walk‑in orders
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
 
-        if request.user.role != "manager":
-
-            return Response(
-                {
-                    "error": "Permission denied"
-                },
-                status=403
-            )
-
+        # 2. Fetch the draft cart
         try:
-
             cart = WalkInCart.objects.get(
-
                 id=pk,
-
-                manager=request.user,
-
+                manager=request.user if request.user.role == "manager" else None,
                 status="draft"
-
             )
-
         except WalkInCart.DoesNotExist:
-
-            return Response(
-                {
-                    "error": "Draft cart not found"
-                },
-                status=404
-            )
+            return Response({"error": "Draft cart not found"}, status=404)
 
         if not cart.items.exists():
+            return Response({"error": "Cart is empty"}, status=400)
 
-            return Response(
-                {
-                    "error": "Cart is empty"
-                },
-                status=400
-            )
+        # Payment status
+        payment_status = request.data.get("payment_status", "unpaid")
+        if payment_status not in ["paid", "unpaid"]:
+            return Response({"error": "Invalid payment status"}, status=400)
 
-        # -----------------------------------
-        # Payment Status
-        # -----------------------------------
+        paid_at = timezone.now() if payment_status == "paid" else None
 
-        payment_status = request.data.get(
-            "payment_status",
-            "unpaid"
-        )
+        # ---------------------------------------------
+        # Manual discount selection (optional)
+        # ---------------------------------------------
+        discount_id = request.data.get("discount_id", None)
+        coupon_code = request.data.get("coupon_code", None)
 
-        if payment_status not in [
-            "paid",
-            "unpaid"
-        ]:
-            payment_status = "unpaid"
+        selected_discount = None
+        selected_coupon = None
 
-            return Response(
-                {
-                    "error": "Invalid payment status"
-                },
-                status=400
-            )
+        if discount_id:
+            try:
+                selected_discount = Discount.objects.get(
+                    id=discount_id,
+                    shop=cart.shop,
+                    is_active=True,
+                    start_date__lte=timezone.now(),
+                    end_date__gte=timezone.now()
+                )
+            except Discount.DoesNotExist:
+                return Response({"error": "Invalid or inactive discount"}, status=400)
 
-        paid_at = None
+            # Ignore coupon if discount is manually selected
+            coupon_code = None
 
-        if payment_status == "paid":
+        # Customer may be None for anonymous walk‑in
+        customer = cart.customer
 
-            paid_at = timezone.now()
-
-        # -----------------------------------
-        # Create Order
-        # -----------------------------------
-
+        # ========================================================
+        # 3. Create the order skeleton
+        # ========================================================
         order = Order.objects.create(
-
-            order_number=
-            generate_walkin_order_number(cart.shop),
-
-            customer=
-            cart.customer,
-
-            shop=
-            cart.shop,
-
-            payment_method=
-            cart.payment_method,
-
-            payment_status=
-            payment_status,
-
-            paid_at=
-            paid_at,
-
-            order_type=
-            "walkin",
-
-            status=
-            "accepted",
-
-            accepted_at=
-            timezone.now(),
-
-            customer_name=
-            cart.customer_name,
-
-            customer_phone=
-            cart.customer_phone,
-
-            notes=
-            cart.notes,
-
-            total_amount=
-            cart.total_amount
-
+            order_number=generate_walkin_order_number(cart.shop),
+            customer=customer,
+            shop=cart.shop,
+            payment_method=cart.payment_method,
+            payment_status=payment_status,
+            paid_at=paid_at,
+            order_type="walkin",
+            status="accepted",
+            accepted_at=timezone.now(),
+            customer_name=cart.customer_name,
+            customer_phone=cart.customer_phone,
+            notes=cart.notes,
+            total_amount=0,
+            original_amount=0,
+            discount_amount=0,
         )
 
-        # -----------------------------------
-        # Copy Items
-        # -----------------------------------
+        # ========================================================
+        # 4. Apply discounts using OfferEngine
+        # ========================================================
+        engine = OfferEngine(
+            customer=customer,
+            shop=cart.shop,
+            coupon_code=coupon_code,          # ignored if discount_id is used
+            forced_discount=selected_discount, # force manual discount if provided
+        )
+
+        original_total = Decimal("0.00")
+        discount_total = Decimal("0.00")
+        final_total = Decimal("0.00")
 
         for item in cart.items.all():
+            # If item has no menu_item → fallback to original cart price
+            if item.menu_item is None:
+                item_price = Decimal(item.item_price) * item.quantity
+                # Create a dummy OfferResult without any discount
+                offer = OfferEngine.empty_result(price=item_price)
+            else:
+                # Get best offer (or forced discount)
+                offer = engine.get_best_offer(
+                    menu_item=item.menu_item,
+                    quantity=item.quantity,
+                )
 
+            # Accumulate totals
+            original_total += offer.original_price
+            discount_total += offer.discount_amount
+            final_total += offer.final_price
+
+            # Track promotion type for the order (only if offer has a discount)
+            if offer.has_offer and offer.promotion_type == "discount":
+                selected_discount = offer.discount
+            elif offer.has_offer and offer.promotion_type == "coupon":
+                selected_coupon = offer.coupon
+
+            # Create OrderItem with full discount details
             OrderItem.objects.create(
-
                 order=order,
-
-                item_name=
-                item.item_name,
-
-                item_price=
-                item.item_price,
-
-                quantity=
-                item.quantity,
-
-                total_price=
-                item.total_price
-
+                menu_item=item.menu_item,
+                discount=offer.discount if offer.promotion_type == "discount" else None,
+                item_name=item.item_name,
+                original_price=offer.original_price,
+                discount_amount=offer.discount_amount,
+                final_price=offer.final_price,
+                quantity=item.quantity,
+                total_price=offer.final_price,
+                discount_name=offer.discount_name,
+                discount_percentage=offer.discount_value
+                if offer.discount_type == "percentage" else None,
+                promotion_type=offer.promotion_type,
             )
 
-        # -----------------------------------
-        # Customer Profile
-        # -----------------------------------
+        # Save totals and promotion info on the order
+        order.original_amount = original_total
+        order.discount_amount = discount_total
+        order.total_amount = final_total
+        order.discount = selected_discount
+        order.coupon = selected_coupon
 
-        if order.customer:
+        if selected_discount:
+            order.promotion_type = "discount"
+            order.discount_name = selected_discount.name
+        elif selected_coupon:
+            order.promotion_type = "coupon"
+        else:
+            order.promotion_type = "none"
+        order.save()
 
-            profile, created = CustomerProfile.objects.get_or_create(
-                user=order.customer
-            )
+        # ========================================================
+        # 5. Record usage (only if customer exists)
+        # ========================================================
+        if customer and selected_discount:
+            try:
+                DiscountUsage.objects.create(
+                    discount=selected_discount,
+                    shop=cart.shop,
+                    order=order,
+                    customer=customer,
+                    order_type="walkin",
+                    discount_type=selected_discount.discount_type,
+                    discount_value=selected_discount.value,
+                    original_amount=original_total,
+                    discount_amount=discount_total,
+                    final_amount=final_total,
+                    quantity=cart.items.count(),
+                )
+            except IntegrityError:
+                pass
 
+        if customer and selected_coupon:
+            try:
+                CouponUsage.objects.create(
+                    coupon=selected_coupon,
+                    customer=customer,
+                    shop=cart.shop,
+                    order=order,
+                    order_type="walkin",
+                    original_amount=original_total,
+                    discount_amount=discount_total,
+                    final_amount=final_total,
+                    quantity=cart.items.count(),
+                )
+            except IntegrityError:
+                pass
+
+        # ========================================================
+        # 6. Update customer stats (only if customer exists)
+        # ========================================================
+        if customer:
+            profile, created = CustomerProfile.objects.get_or_create(user=customer)
             profile.total_orders += 1
-
             profile.save()
 
-        # -----------------------------------
-        # Notify Frontend
-        # -----------------------------------
-
+        # ========================================================
+        # 7. Notify frontend & mark cart as placed
+        # ========================================================
         send_order_update(order)
 
-        # -----------------------------------
-        # Mark Draft Completed
-        # -----------------------------------
-
         cart.status = "placed"
-
         cart.save()
 
+        # Remove cart items after successful placement
         cart.items.all().delete()
 
         serializer = OrderSerializer(order)
-
         return Response({
-
             "success": True,
-
             "message": "Walk-In Order Created Successfully",
-
-            "order": serializer.data
-
-        })       
+            "order": serializer.data,
+        })  
         
         
 def update_order_total(order):
@@ -2837,4 +2790,280 @@ class DeletePlacedOrderItemView(APIView):
 
             "order": serializer.data
 
+        })
+        
+
+from django.db.models import Q
+from discounts.models import Discount
+from discounts.coupon_models import Coupon
+class CheckoutPreviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        shop_id = request.data.get("shop_id")
+        promotion_type = request.data.get("promotion_type")
+        promotion_id = request.data.get("promotion_id")
+        coupon_code = request.data.get("coupon_code")
+
+        if not shop_id:
+            return Response({"error": "Shop ID required"}, status=400)
+
+        try:
+            shop = Shop.objects.get(id=shop_id, is_active=True)
+        except Shop.DoesNotExist:
+            return Response({"error": "Shop not found"}, status=404)
+
+        try:
+            cart = Cart.objects.get(customer=request.user)
+        except Cart.DoesNotExist:
+            return Response({"error": "Cart not found"}, status=400)
+
+        cart_items = CartItem.objects.filter(cart=cart)
+        if not cart_items.exists():
+            return Response({"error": "Cart empty"}, status=400)
+
+        selected_discount = None
+        selected_coupon = None
+
+        if promotion_type == "discount" and promotion_id:
+            try:
+                selected_discount = Discount.objects.get(id=promotion_id, is_active=True)
+            except Discount.DoesNotExist:
+                return Response({"error": "Discount not found"}, status=400)
+        elif promotion_type == "coupon" and coupon_code:
+            try:
+                selected_coupon = Coupon.objects.get(code=coupon_code, status='active')
+            except Coupon.DoesNotExist:
+                return Response({"error": "Coupon not found"}, status=400)
+
+        engine = OfferEngine(
+            customer=request.user,
+            shop=shop,
+            coupon_code=coupon_code if selected_coupon else None,
+            forced_discount=selected_discount,
+        )
+
+        # Use calculate_cart to get rounded totals and adjusted item discounts
+        result = engine.calculate_cart(cart_items)
+
+        # Find applied promotion name and type from first item that has an offer
+        applied_discount_name = None
+        applied_discount_type = None
+        message = None
+
+        for item_result in result["items"]:
+            offer = item_result["offer"]
+            if offer.promotion_type == "discount":
+                applied_discount_name = offer.discount.name if offer.discount else None
+                applied_discount_type = "discount"
+                break
+            elif offer.promotion_type == "coupon":
+                applied_discount_name = offer.coupon.code if offer.coupon else None
+                applied_discount_type = "coupon"
+                break
+
+        # Get the first message if any offer failed
+        for item_result in result["items"]:
+            if not item_result["offer"].has_offer and item_result["offer"].message:
+                message = item_result["offer"].message
+                break
+
+        # Build per‑item breakdown for frontend
+        items_breakdown = []
+        for item_result in result["items"]:
+            offer = item_result["offer"]
+            items_breakdown.append({
+                "item_name": item_result["item"].menu_item.name,
+                "original_price": offer.original_price,
+                "discount_amount": offer.discount_amount,
+                "final_price": offer.final_price,
+            })
+
+        return Response({
+            "original_total": result["original_total"],
+            "discount_amount": result["discount_total"],
+            "final_total": result["final_total"],
+            "discount_type": applied_discount_type,
+            "discount_name": applied_discount_name,
+            "message": message,
+            "items": items_breakdown,   # <-- added for per‑item display
+        })
+        
+        
+class AvailablePromotionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        shop_id = request.query_params.get('shop_id')
+        if not shop_id:
+            return Response({"error": "shop_id required"}, status=400)
+
+        now = timezone.now()
+
+        # Discounts
+        discounts = Discount.objects.filter(
+            Q(shop_id=shop_id) | Q(shop__isnull=True),
+            is_active=True,
+            start_date__lte=now,
+            end_date__gte=now,
+        )
+
+        # Coupons
+        coupons = Coupon.objects.filter(
+            Q(shop_id=shop_id) | Q(shop__isnull=True),
+            status='active',
+            start_date__lte=now,
+            end_date__gte=now,
+        )
+
+        # Debug: print counts
+        print(f"Discounts: {discounts.count()}, Coupons: {coupons.count()}")
+
+        promotions = []
+        for d in discounts:
+            promotions.append({
+                "id": d.id,
+                "type": "discount",
+                "name": d.name,
+                "description": d.description,
+                "discount_type": d.discount_type,
+                "value": d.value,
+                "code": None,
+                "apply_on": d.apply_on,
+                "minimum_order": d.minimum_order_amount,
+            })
+        for c in coupons:
+            promotions.append({
+                "id": c.id,
+                "type": "coupon",
+                "name": c.name,
+                "description": c.description,
+                "discount_type": c.discount_type,
+                "value": c.value,
+                "code": c.code,          # ← important: include the code
+                "apply_on": None,        # coupons have no apply_on
+                "minimum_order": c.minimum_order_amount,
+            })
+
+        return Response({"promotions": promotions})
+    
+
+# Add to orders/views.py (at the end of the file)
+
+from .receipt_utils import generate_receipt_data, generate_receipt_text
+
+# ==========================================
+# RECEIPT GENERATION VIEWS
+# ==========================================
+
+# ==========================================
+# RECEIPT GENERATION VIEWS
+# ==========================================
+
+class GenerateReceiptView(APIView):
+    """
+    Generate receipt for an order (online or walk-in)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        # Check permission
+        if request.user.role not in ['manager', 'super_admin']:
+            # Customers can view their own receipts
+            try:
+                order = Order.objects.get(id=pk, customer=request.user)
+            except Order.DoesNotExist:
+                return Response(
+                    {'error': 'Order not found or access denied'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        else:
+            # Managers can view any order in their shop
+            try:
+                shop = request.user.manager_profile.shop
+                order = Order.objects.get(id=pk, shop=shop)
+            except Exception:
+                return Response(
+                    {'error': 'Order not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        receipt_data = generate_receipt_data(order)
+        return Response(receipt_data, status=status.HTTP_200_OK)
+
+
+class PrintReceiptView(APIView):
+    """
+    Print receipt directly (for manager)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role != 'manager':
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            shop = request.user.manager_profile.shop
+            order = Order.objects.get(id=pk, shop=shop)
+        except Exception:
+            return Response(
+                {'error': 'Order not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Get receipt text
+        receipt_text = generate_receipt_text(order)
+        
+        # Return text for client-side printing
+        return Response({
+            'success': True,
+            'receipt_text': receipt_text,
+            'receipt_data': generate_receipt_data(order)
+        })
+
+
+class BulkPrintReceiptsView(APIView):
+    """
+    Print multiple receipts at once (for batch operations)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role != 'manager':
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        order_ids = request.data.get('order_ids', [])
+        if not order_ids:
+            return Response(
+                {'error': 'No order IDs provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            shop = request.user.manager_profile.shop
+            orders = Order.objects.filter(id__in=order_ids, shop=shop)
+        except Exception:
+            return Response(
+                {'error': 'Orders not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        receipts = []
+        for order in orders:
+            receipts.append({
+                'order_number': order.order_number,
+                'receipt_text': generate_receipt_text(order),
+                'total_amount': float(order.total_amount),
+            })
+
+        return Response({
+            'success': True,
+            'count': len(receipts),
+            'receipts': receipts
         })
