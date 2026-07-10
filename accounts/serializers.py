@@ -1,7 +1,6 @@
 from rest_framework import serializers
 from .models import User
-from .models import CustomerProfile
-from .models import ManagerProfile
+from .models import CustomerProfile, CustomerFlag, ManagerProfile
 
 
 
@@ -83,3 +82,62 @@ class ManagerSerializer(
             pass
 
         return None
+    
+    
+
+
+class CustomerFlagSerializer(serializers.ModelSerializer):
+    flagged_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomerFlag
+        fields = ['id', 'reason', 'created_at', 'flagged_by', 'flagged_by_name']
+
+    def get_flagged_by_name(self, obj):
+        return f"{obj.flagged_by.first_name} {obj.flagged_by.last_name}" if obj.flagged_by else "System"
+
+
+class CustomerProfileSerializer(serializers.ModelSerializer):
+    user_id = serializers.IntegerField(source='id')
+    username = serializers.CharField(source='username')
+    full_name = serializers.SerializerMethodField()
+    phone = serializers.CharField(source='phone')
+    email = serializers.EmailField(source='email')
+    is_active = serializers.BooleanField(source='is_active')
+    flags = CustomerFlagSerializer(many=True, read_only=True, source='customer_flags')
+    trust_score = serializers.IntegerField(source='customerprofile.trust_score')
+    total_orders = serializers.IntegerField(source='customerprofile.total_orders')
+    total_completed_orders = serializers.IntegerField(source='customerprofile.total_completed_orders')
+    total_cancelled_orders = serializers.IntegerField(source='customerprofile.total_cancelled_orders')
+    total_rejected_orders = serializers.IntegerField(source='customerprofile.total_rejected_orders')
+    is_flagged = serializers.BooleanField(source='customerprofile.is_flagged')
+
+    class Meta:
+        model = User
+        fields = [
+            'user_id', 'username', 'full_name', 'phone', 'email',
+            'is_active', 'trust_score', 'total_orders', 'total_completed_orders',
+            'total_cancelled_orders', 'total_rejected_orders', 'is_flagged', 'flags'
+        ]
+
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.username
+
+
+class CustomerListSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    trust_score = serializers.IntegerField(source='customerprofile.trust_score')
+    total_orders = serializers.IntegerField(source='customerprofile.total_orders')
+    is_flagged = serializers.BooleanField(source='customerprofile.is_flagged')
+    is_active = serializers.BooleanField()  # directly from User
+    flag_count = serializers.IntegerField(source='customer_flags.count')
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'full_name', 'phone', 'email',
+            'trust_score', 'total_orders', 'is_flagged', 'is_active', 'flag_count'
+        ]
+
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.username

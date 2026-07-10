@@ -8,7 +8,12 @@ from .views import (
     CreateManagerView,
     ManagerListView,
     AssignManagerView,
-    ManagerDetailView
+    ManagerDetailView,
+    CustomerListView,
+    CustomerDetailView,
+    CustomerFlagCreateView,
+    CustomerFlagDeleteView,
+    CustomerToggleBlockView,    
     
 )
 
@@ -52,5 +57,11 @@ urlpatterns = [
         "managers/<int:pk>/",
         ManagerDetailView.as_view()
     ),
+    
+    path('customers/', CustomerListView.as_view(), name='customer-list'),
+    path('customers/<int:pk>/', CustomerDetailView.as_view(), name='customer-detail'),
+    path('customers/<int:customer_id>/flag/', CustomerFlagCreateView.as_view(), name='customer-flag-create'),
+    path('customers/<int:customer_id>/flag/<int:flag_id>/', CustomerFlagDeleteView.as_view(), name='customer-flag-delete'),
+    path('customers/<int:customer_id>/toggle-block/', CustomerToggleBlockView.as_view(), name='customer-toggle-block'),
 
 ]

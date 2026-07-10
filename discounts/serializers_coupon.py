@@ -199,3 +199,41 @@ class CouponUsageSerializer(
         model = CouponUsage
 
         fields = "__all__"
+        
+
+
+class UsageSummarySerializer(serializers.Serializer):
+    """Serializer for aggregated usage data per date."""
+    date = serializers.DateField()
+    total_usage_count = serializers.IntegerField()
+    total_discount_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    discount_usage_count = serializers.IntegerField()
+    coupon_usage_count = serializers.IntegerField()
+    discount_total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    coupon_total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class UsageListSerializer(serializers.Serializer):
+    """Serializer for individual usage records (unified)."""
+    id = serializers.IntegerField()
+    type = serializers.CharField()  # 'discount' or 'coupon'
+    shop = serializers.IntegerField(source='shop.id')
+    shop_name = serializers.CharField(source='shop.name')
+    order = serializers.IntegerField(source='order.id')
+    order_number = serializers.CharField(source='order.order_number')
+    customer = serializers.IntegerField(source='customer.id')
+    customer_name = serializers.CharField(source='customer.get_full_name')
+    order_type = serializers.CharField()
+    original_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    discount_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    final_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    created_at = serializers.DateTimeField()
+    # For discount/coupon name
+    discount_name = serializers.SerializerMethodField()
+
+    def get_discount_name(self, obj):
+        if hasattr(obj, 'discount'):
+            return obj.discount.name
+        elif hasattr(obj, 'coupon'):
+            return obj.coupon.name
+        return None

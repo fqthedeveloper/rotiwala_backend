@@ -1,7 +1,6 @@
 import uuid
 from datetime import timedelta
 from django.utils import timezone
-from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -61,6 +60,22 @@ from discounts.offer_engine import OfferEngine                          # <-- im
 from discounts.models import Discount, DiscountUsage                # <-- for usage tracking
 from discounts.coupon_models import CouponUsage            # <-- for coupon usage
 
+
+# Add this function at the end of the file
+def orders_root(request):
+    """
+    Root endpoint for orders API
+    """
+    return Response({
+        'message': 'Orders API',
+        'endpoints': {
+            'place': '/api/orders/place/',
+            'my_orders': '/api/orders/my-orders/',
+            'manager': '/api/orders/manager/',
+            'receipt': '/api/orders/receipt/<id>/',
+        }
+    })
+    
 
 class PlaceOrderView(APIView):
     permission_classes = [IsAuthenticated]
@@ -2949,12 +2964,24 @@ class AvailablePromotionsView(APIView):
     
 
 # Add to orders/views.py (at the end of the file)
+from django.views import View
+from django.http import HttpResponse
+from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework_simplejwt.tokens import AccessToken
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from .receipt_utils import (
+    QR_SUPPORT,
+    generate_receipt_text, 
+    generate_receipt_data, 
+    generate_receipt_pdf,
+    generate_qr_code,
+    PDF_SUPPORT
+)
+import logging
 
-from .receipt_utils import generate_receipt_data, generate_receipt_text
-
-# ==========================================
-# RECEIPT GENERATION VIEWS
-# ==========================================
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # RECEIPT GENERATION VIEWS
@@ -2988,20 +3015,88 @@ class GenerateReceiptView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-        receipt_data = generate_receipt_data(order)
+        bill_type = request.GET.get('bill_type', 'standard')
+        receipt_data = generate_receipt_data(order, bill_type)
+        
+        # Add QR code for digital receipts
+        if QR_SUPPORT:
+            receipt_data['qr_code'] = generate_qr_code(order)
+        
         return Response(receipt_data, status=status.HTTP_200_OK)
 
 
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DownloadReceiptPDFView(View):
+    def get(self, request, pk):
+        # ---- Authentication ----
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return HttpResponse('Authentication required.', status=401, content_type='text/plain')
+        try:
+            token = auth_header[7:] if auth_header.startswith('Bearer ') else auth_header
+            access_token = AccessToken(token)
+            user = User.objects.get(id=access_token['user_id'])
+        except Exception:
+            return HttpResponse('Invalid token.', status=401, content_type='text/plain')
+
+        # ---- Permission ----
+        try:
+            if user.role not in ['manager', 'super_admin']:
+                order = Order.objects.get(id=pk, customer=user)
+            else:
+                shop = user.manager_profile.shop
+                order = Order.objects.get(id=pk, shop=shop)
+        except Order.DoesNotExist:
+            return HttpResponse('Order not found.', status=404, content_type='text/plain')
+        except Exception:
+            return HttpResponse('Access denied.', status=403, content_type='text/plain')
+
+        bill_type = request.GET.get('bill_type', 'standard')
+
+        # ---- Generate PDF ----
+        try:
+            pdf_bytes = generate_receipt_pdf(order, bill_type)
+            # Ensure bytes
+            if not isinstance(pdf_bytes, bytes):
+                pdf_bytes = bytes(pdf_bytes)
+
+            # Validate PDF
+            if not pdf_bytes.startswith(b'%PDF'):
+                # Last resort: return plain text
+                text = generate_receipt_text(order, bill_type)
+                response = HttpResponse(text, content_type='text/plain; charset=utf-8')
+                response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.txt"'
+                return response
+
+            # Success – return PDF
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
+            # ✅ Use order number in filename
+            response['Content-Disposition'] = f'attachment; filename="invoice_{order.order_number}.pdf"'
+            response['Content-Length'] = str(len(pdf_bytes))
+            response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            return response
+
+        except Exception as e:
+            # Fallback to text on any error
+            text = generate_receipt_text(order, bill_type)
+            response = HttpResponse(text, content_type='text/plain; charset=utf-8')
+            response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.txt"'
+            return response
+        
+        
+
 class PrintReceiptView(APIView):
     """
-    Print receipt directly (for manager)
+    Print receipt directly - Available ONLY for Managers
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role != 'manager':
+        # ONLY managers can print
+        if request.user.role not in ['manager', 'super_admin']:
             return Response(
-                {'error': 'Permission denied'},
+                {'error': 'Permission denied. Only managers can print receipts.'},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -3014,27 +3109,97 @@ class PrintReceiptView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Get receipt text
-        receipt_text = generate_receipt_text(order)
+        bill_type = request.data.get('bill_type', 'standard')
+        receipt_text = generate_receipt_text(order, bill_type)
         
-        # Return text for client-side printing
         return Response({
             'success': True,
             'receipt_text': receipt_text,
-            'receipt_data': generate_receipt_data(order)
+            'receipt_data': generate_receipt_data(order, bill_type)
         })
+
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DownloadReceiptTextView(View):
+    """
+    Download receipt as text file - Available ONLY for Managers
+    """
+    
+    def get(self, request, pk):
+        # Get token from Authorization header
+        auth_header = request.headers.get('Authorization')
+        
+        if not auth_header:
+            return HttpResponse(
+                'Authentication credentials were not provided.',
+                status=401,
+                content_type='text/plain'
+            )
+        
+        # Extract token
+        try:
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+            else:
+                token = auth_header
+        except Exception:
+            return HttpResponse(
+                'Invalid authentication format.',
+                status=401,
+                content_type='text/plain'
+            )
+        
+        # Verify token and get user
+        try:
+            access_token = AccessToken(token)
+            user_id = access_token['user_id']
+            user = User.objects.get(id=user_id)
+        except Exception:
+            return HttpResponse(
+                'Invalid token',
+                status=401,
+                content_type='text/plain'
+            )
+        
+        # ONLY managers can download text
+        if user.role not in ['manager', 'super_admin']:
+            return HttpResponse(
+                'Permission denied. Only managers can download text receipts.',
+                status=403,
+                content_type='text/plain'
+            )
+
+        # Get the order
+        try:
+            shop = user.manager_profile.shop
+            order = Order.objects.get(id=pk, shop=shop)
+        except Exception:
+            return HttpResponse(
+                'Order not found',
+                status=404,
+                content_type='text/plain'
+            )
+
+        bill_type = request.GET.get('bill_type', 'standard')
+        receipt_text = generate_receipt_text(order, bill_type)
+        
+        response = HttpResponse(receipt_text, content_type='text/plain; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.txt"'
+        return response
 
 
 class BulkPrintReceiptsView(APIView):
     """
-    Print multiple receipts at once (for batch operations)
+    Print multiple receipts at once - Available ONLY for Managers
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if request.user.role != 'manager':
+        # ONLY managers can bulk print
+        if request.user.role not in ['manager', 'super_admin']:
             return Response(
-                {'error': 'Permission denied'},
+                {'error': 'Permission denied. Only managers can bulk print.'},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -3054,11 +3219,12 @@ class BulkPrintReceiptsView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        bill_type = request.data.get('bill_type', 'standard')
         receipts = []
         for order in orders:
             receipts.append({
                 'order_number': order.order_number,
-                'receipt_text': generate_receipt_text(order),
+                'receipt_text': generate_receipt_text(order, bill_type),
                 'total_amount': float(order.total_amount),
             })
 
@@ -3067,3 +3233,109 @@ class BulkPrintReceiptsView(APIView):
             'count': len(receipts),
             'receipts': receipts
         })
+
+
+class AvailableBillTypesView(APIView):
+    """
+    Get available bill types - Available for all authenticated users
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        bill_types = [
+            {'id': 'standard', 'name': 'Standard Bill', 'description': 'Regular bill format', 'icon': '📄'},
+            {'id': 'detailed', 'name': 'Detailed Bill', 'description': 'Detailed breakdown with discounts', 'icon': '📊'},
+            {'id': 'compact', 'name': 'Compact Bill', 'description': 'Compact format for thermal printer', 'icon': '📋'},
+        ]
+        
+        return Response({
+            'bill_types': bill_types
+        })
+        
+
+# orders/views.py - Add this for inline preview
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ViewReceiptPDFView(View):
+    """
+    View receipt PDF inline in the browser (for testing)
+    """
+    
+    def get(self, request, pk):
+        # --- Authentication (same as before) ---
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return HttpResponse('Authentication required.', status=401, content_type='text/plain')
+        
+        try:
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+            else:
+                token = auth_header
+            access_token = AccessToken(token)
+            user_id = access_token['user_id']
+            user = User.objects.get(id=user_id)
+        except Exception:
+            return HttpResponse('Invalid token.', status=401, content_type='text/plain')
+        
+        # --- Permission check ---
+        try:
+            if user.role not in ['manager', 'super_admin']:
+                order = Order.objects.get(id=pk, customer=user)
+            else:
+                shop = user.manager_profile.shop
+                order = Order.objects.get(id=pk, shop=shop)
+        except Order.DoesNotExist:
+            return HttpResponse('Order not found.', status=404, content_type='text/plain')
+        except Exception:
+            return HttpResponse('Access denied.', status=403, content_type='text/plain')
+        
+        # --- Get bill type ---
+        bill_type = request.GET.get('bill_type', 'standard')
+        
+        try:
+            # Generate PDF (returns bytes)
+            pdf_bytes = generate_receipt_pdf(order, bill_type)
+            
+            # If we got text (fallback), return as text
+            if isinstance(pdf_bytes, str):
+                response = HttpResponse(pdf_bytes, content_type='text/plain; charset=utf-8')
+                response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.txt"'
+                return response
+            
+            # Ensure we have bytes
+            if not isinstance(pdf_bytes, bytes):
+                pdf_bytes = bytes(pdf_bytes)
+            
+            # Validate PDF signature
+            if not pdf_bytes.startswith(b'%PDF'):
+                # Not a valid PDF, return text
+                text_receipt = generate_receipt_text(order, bill_type)
+                response = HttpResponse(text_receipt, content_type='text/plain; charset=utf-8')
+                response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.txt"'
+                return response
+            
+            # --- Return PDF with proper headers ---
+            response = HttpResponse(
+                pdf_bytes,
+                content_type='application/pdf',
+                status=200
+            )
+            # Force download as attachment
+            response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.pdf"'
+            response['Content-Length'] = str(len(pdf_bytes))
+            # Prevent any caching or transformation
+            response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+            # Ensure binary transfer
+            response['Content-Transfer-Encoding'] = 'binary'
+            
+            return response
+        
+        except Exception as e:
+            return HttpResponse(
+                f'PDF generation error: {str(e)}',
+                status=500,
+                content_type='text/plain'
+            )

@@ -250,3 +250,6 @@ class BulkCouponGeneratorView(APIView):
             "codes":created
 
         })
+        
+        
+

@@ -3,6 +3,8 @@ from .views import (
     DiscountListCreateView,
     DiscountDetailView,
     DiscountDashboardView,
+    UsageSummaryView,
+    UsageListView,
 )
 
 urlpatterns = [
@@ -14,4 +16,7 @@ urlpatterns = [
 
     # Dashboard summary
     path("dashboard/", DiscountDashboardView.as_view()),
+    
+    path('usage-summary/', UsageSummaryView.as_view(), name='usage-summary'),
+    path('usage-list/', UsageListView.as_view(), name='usage-list'),
 ]

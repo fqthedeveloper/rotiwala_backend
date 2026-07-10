@@ -498,3 +498,116 @@ class AssignManagerView(APIView):
             "message":
             "Manager Assigned"
         })
+        
+        
+from rest_framework import generics, status
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.db.models import Q
+from .models import User, CustomerProfile, CustomerFlag
+from .serializers import CustomerListSerializer, CustomerProfileSerializer, CustomerFlagSerializer
+from .permissions import IsSuperAdmin
+        
+        
+class CustomerListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    serializer_class = CustomerListSerializer
+    pagination_class = None  # or custom pagination
+
+    def get_queryset(self):
+        queryset = User.objects.filter(role='customer').select_related('customerprofile').prefetch_related('customer_flags')
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(username__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(email__icontains=search) |
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search)
+            )
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+        is_flagged = self.request.query_params.get('is_flagged')
+        if is_flagged is not None:
+            queryset = queryset.filter(customerprofile__is_flagged=is_flagged.lower() == 'true')
+        return queryset.order_by('-date_joined')
+    
+    
+
+class CustomerDetailView(generics.RetrieveUpdateAPIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    serializer_class = CustomerProfileSerializer
+    queryset = User.objects.filter(role='customer').select_related('customerprofile').prefetch_related('customer_flags')
+
+    def update(self, request, *args, **kwargs):
+        user = self.get_object()
+        is_active = request.data.get('is_active')
+        if is_active is not None:
+            user.is_active = bool(is_active)
+            user.save()
+        return Response({'message': 'User updated successfully'})
+    
+
+class CustomerFlagCreateView(generics.CreateAPIView):
+    """
+    POST /api/accounts/customers/<id>/flag/
+    Body: { "reason": "..." }
+    Super admin only.
+    """
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    serializer_class = CustomerFlagSerializer
+
+    def perform_create(self, serializer):
+        user_id = self.kwargs.get('customer_id')
+        customer = User.objects.get(id=user_id, role='customer')
+        profile, _ = CustomerProfile.objects.get_or_create(user=customer)
+        # Create flag
+        serializer.save(customer=customer, flagged_by=self.request.user)
+        # Update profile is_flagged = True
+        profile.is_flagged = True
+        profile.save()
+
+
+class CustomerFlagDeleteView(generics.DestroyAPIView):
+    """
+    DELETE /api/accounts/customers/<id>/flag/<flag_id>/
+    Super admin only.
+    """
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def delete(self, request, *args, **kwargs):
+        customer_id = kwargs.get('customer_id')
+        flag_id = kwargs.get('flag_id')
+        try:
+            flag = CustomerFlag.objects.get(id=flag_id, customer_id=customer_id)
+            flag.delete()
+            # Check if any flags remain
+            remaining = CustomerFlag.objects.filter(customer_id=customer_id).exists()
+            if not remaining:
+                CustomerProfile.objects.filter(user_id=customer_id).update(is_flagged=False)
+            return Response({'message': 'Flag removed'}, status=status.HTTP_204_NO_CONTENT)
+        except CustomerFlag.DoesNotExist:
+            return Response({'error': 'Flag not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+class CustomerToggleBlockView(generics.UpdateAPIView):
+    """
+    PATCH /api/accounts/customers/<id>/toggle-block/
+    Body: { "is_active": true/false }
+    Super admin only.
+    """
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def patch(self, request, *args, **kwargs):
+        user_id = kwargs.get('customer_id')
+        try:
+            user = User.objects.get(id=user_id, role='customer')
+        except User.DoesNotExist:
+            return Response({'error': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
+        is_active = request.data.get('is_active')
+        if is_active is None:
+            return Response({'error': 'is_active field required'}, status=status.HTTP_400_BAD_REQUEST)
+        user.is_active = bool(is_active)
+        user.save()
+        return Response({'message': f"User {'blocked' if not is_active else 'unblocked'} successfully"})
