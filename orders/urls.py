@@ -55,5 +55,6 @@ urlpatterns = [
     path('receipt/bulk-print/', BulkPrintReceiptsView.as_view(), name='bulk-print-receipts'),
     path('receipt/bill-types/', AvailableBillTypesView.as_view(), name='bill-types'),
     path('receipt/<int:pk>/view/', ViewReceiptPDFView.as_view(), name='view-receipt-pdf'),
+    path('superadmin/orders/', SuperAdminOrderListView.as_view(), name='superadmin-orders'),
 
 ]

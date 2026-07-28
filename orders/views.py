@@ -3388,3 +3388,40 @@ class ViewReceiptPDFView(View):
                 status=500,
                 content_type='text/plain'
             )
+            
+
+from rest_framework import generics
+from rest_framework.permissions import IsAuthenticated
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.filters import SearchFilter, OrderingFilter
+from .models import Order
+from .serializers import OrderSerializer
+from accounts.permissions import IsSuperAdmin
+from rest_framework.pagination import PageNumberPagination
+
+         
+class SuperAdminOrderListView(generics.ListAPIView):
+    """
+    Super Admin endpoint to list all orders with filtering & pagination.
+    """
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    serializer_class = OrderSerializer
+    pagination_class = PageNumberPagination
+    pagination_class.page_size = 15                    # default items per page
+    pagination_class.page_size_query_param = 'page_size'  # allow frontend to set
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['status', 'order_type', 'payment_status', 'shop__id']
+    search_fields = ['order_number', 'customer__phone', 'customer__first_name', 'customer__last_name']
+    ordering_fields = ['ordered_at', 'total_amount', 'status']
+    ordering = ['-ordered_at']
+
+    def get_queryset(self):
+        queryset = Order.objects.select_related('shop', 'customer').prefetch_related('items')
+        # Optional date range
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        if start_date:
+            queryset = queryset.filter(ordered_at__date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(ordered_at__date__lte=end_date)
+        return queryset

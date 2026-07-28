@@ -12,10 +12,17 @@ from rest_framework import generics, status
 from .serializers import ManagerSerializer
 from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
+from django.db.models import Sum, Count, Q
+from django.utils import timezone
+from datetime import timedelta
+from .permissions import IsSuperAdmin
+from orders.models import Order, OrderItem
+from shops.models import Shop
+from menu.models import MenuItem
+from accounts.models import User, CustomerProfile
+from django.db.models.functions import TruncDate
 
-from accounts.permissions import (
-    IsSuperAdmin
-)
+
 
 
 class CustomerRegisterView(APIView):
@@ -712,3 +719,161 @@ class CustomerFlagDeleteView(generics.DestroyAPIView):
             return Response({'message': 'Flag removed'}, status=status.HTTP_204_NO_CONTENT)
         else:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        
+        
+# ---------- Super Admin Dashboard Stats ----------
+class SuperAdminDashboardStatsView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def get(self, request):
+        # Aggregations across all shops
+        total_orders = Order.objects.count()
+        total_revenue = Order.objects.filter(status='completed').aggregate(total=Sum('total_amount'))['total'] or 0
+        total_customers = User.objects.filter(role='customer').count()
+        total_shops = Shop.objects.filter(is_active=True).count()
+        total_products = MenuItem.objects.filter(is_available=True).count()
+
+        pending_orders = Order.objects.filter(status='pending').count()
+        completed_orders = Order.objects.filter(status='completed').count()
+        cancelled_orders = Order.objects.filter(status='cancelled').count()
+
+        today = timezone.now().date()
+        orders_today = Order.objects.filter(ordered_at__date=today).count()
+        revenue_today = Order.objects.filter(
+            ordered_at__date=today,
+            status='completed'
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+
+        # Week
+        start_of_week = today - timedelta(days=today.weekday())
+        orders_this_week = Order.objects.filter(ordered_at__date__gte=start_of_week).count()
+        revenue_this_week = Order.objects.filter(
+            ordered_at__date__gte=start_of_week,
+            status='completed'
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+
+        # Month
+        start_of_month = today.replace(day=1)
+        orders_this_month = Order.objects.filter(ordered_at__date__gte=start_of_month).count()
+        revenue_this_month = Order.objects.filter(
+            ordered_at__date__gte=start_of_month,
+            status='completed'
+        ).aggregate(total=Sum('total_amount'))['total'] or 0
+
+        data = {
+            'total_orders': total_orders,
+            'total_revenue': total_revenue,
+            'total_customers': total_customers,
+            'total_shops': total_shops,
+            'total_products': total_products,
+            'pending_orders': pending_orders,
+            'completed_orders': completed_orders,
+            'cancelled_orders': cancelled_orders,
+            'orders_today': orders_today,
+            'revenue_today': revenue_today,
+            'orders_this_week': orders_this_week,
+            'revenue_this_week': revenue_this_week,
+            'orders_this_month': orders_this_month,
+            'revenue_this_month': revenue_this_month,
+        }
+        return Response(data)
+
+
+# ---------- Recent Orders ----------
+class SuperAdminRecentOrdersView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def get(self, request):
+        limit = int(request.query_params.get('limit', 10))
+        orders = Order.objects.select_related('shop', 'customer').order_by('-ordered_at')[:limit]
+        data = []
+        for order in orders:
+            data.append({
+                'id': order.id,
+                'shop_name': order.shop.name,
+                'customer_name': order.customer.get_full_name() if order.customer else order.customer_name or 'Guest',
+                'total': order.total_amount,
+                'status': order.status,
+                'created_at': order.ordered_at,
+            })
+        return Response(data)
+
+
+# ---------- Revenue Trend (daily) ----------
+class SuperAdminRevenueTrendView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def get(self, request):
+        days = int(request.query_params.get('days', 30))
+        end_date = timezone.now().date()
+        start_date = end_date - timedelta(days=days-1)
+
+        # Use ORM to get daily revenue for completed orders
+        # We'll group by date using TruncDate
+        trend = (
+            Order.objects.filter(
+                ordered_at__date__gte=start_date,
+                ordered_at__date__lte=end_date,
+                status='completed'
+            )
+            .annotate(date=TruncDate('ordered_at'))
+            .values('date')
+            .annotate(revenue=Sum('total_amount'))
+            .order_by('date')
+        )
+
+        # Fill missing dates with zero
+        date_range = [start_date + timedelta(days=i) for i in range(days)]
+        result = []
+        trend_dict = {item['date']: item['revenue'] for item in trend}
+        for d in date_range:
+            result.append({
+                'date': d.strftime('%Y-%m-%d'),
+                'revenue': float(trend_dict.get(d, 0)),
+            })
+        return Response(result)
+
+
+# ---------- Orders by Shop ----------
+class SuperAdminOrdersByShopView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def get(self, request):
+        shops = Shop.objects.annotate(
+            order_count=Count('order'),
+            revenue=Sum('order__total_amount', filter=Q(order__status='completed'))
+        ).values('name', 'order_count', 'revenue')
+
+        data = []
+        for shop in shops:
+            data.append({
+                'shop_name': shop['name'],
+                'order_count': shop['order_count'],
+                'revenue': float(shop['revenue'] or 0),
+            })
+        return Response(data)
+
+
+# ---------- Top Selling Products ----------
+class SuperAdminTopProductsView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def get(self, request):
+        limit = int(request.query_params.get('limit', 6))
+        # Aggregate total quantity sold per menu item across all orders
+        top = (
+            OrderItem.objects
+            .values('menu_item_id', 'menu_item__name')
+            .annotate(total_quantity=Sum('quantity'))
+            .order_by('-total_quantity')[:limit]
+        )
+
+        data = []
+        for item in top:
+            data.append({
+                'id': item['menu_item_id'],
+                'name': item['menu_item__name'],
+                'total_quantity': item['total_quantity'],
+            })
+        return Response(data)
