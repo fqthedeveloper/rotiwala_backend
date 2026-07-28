@@ -506,47 +506,98 @@ from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
 from .models import User, CustomerProfile, CustomerFlag
 from .serializers import CustomerListSerializer, CustomerProfileSerializer, CustomerFlagSerializer
-from .permissions import IsSuperAdmin
-        
+from .permissions import IsSuperAdmin, IsSuperAdminOrManagerOrSelf
+from orders.models import Order
+from rest_framework.exceptions import PermissionDenied
+from .utils import manager_can_access_customer
+
         
 class CustomerListView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [IsAuthenticated, IsSuperAdminOrManagerOrSelf]
     serializer_class = CustomerListSerializer
-    pagination_class = None  # or custom pagination
+    pagination_class = None
 
     def get_queryset(self):
+        user = self.request.user
         queryset = User.objects.filter(role='customer').select_related('customerprofile').prefetch_related('customer_flags')
-        search = self.request.query_params.get('search')
-        if search:
-            queryset = queryset.filter(
-                Q(username__icontains=search) |
-                Q(phone__icontains=search) |
-                Q(email__icontains=search) |
-                Q(first_name__icontains=search) |
-                Q(last_name__icontains=search)
-            )
-        is_active = self.request.query_params.get('is_active')
-        if is_active is not None:
-            queryset = queryset.filter(is_active=is_active.lower() == 'true')
-        is_flagged = self.request.query_params.get('is_flagged')
-        if is_flagged is not None:
-            queryset = queryset.filter(customerprofile__is_flagged=is_flagged.lower() == 'true')
-        return queryset.order_by('-date_joined')
+
+        if user.role == 'super_admin':
+            # Apply search and filters
+            search = self.request.query_params.get('search')
+            if search:
+                queryset = queryset.filter(
+                    Q(username__icontains=search) |
+                    Q(phone__icontains=search) |
+                    Q(email__icontains=search) |
+                    Q(first_name__icontains=search) |
+                    Q(last_name__icontains=search)
+                )
+            is_active = self.request.query_params.get('is_active')
+            if is_active is not None:
+                queryset = queryset.filter(is_active=is_active.lower() == 'true')
+            is_flagged = self.request.query_params.get('is_flagged')
+            if is_flagged is not None:
+                queryset = queryset.filter(customerprofile__is_flagged=is_flagged.lower() == 'true')
+            return queryset.order_by('-date_joined')
+
+        elif user.role == 'manager':
+            shop = getattr(user.manager_profile, 'shop', None)
+            if shop:
+                customer_ids = Order.objects.filter(shop=shop).values_list('customer_id', flat=True).distinct()
+                queryset = queryset.filter(id__in=customer_ids)
+            else:
+                queryset = queryset.none()
+            # optional search/filter ...
+            return queryset.order_by('-date_joined')
+
+        # Customer role: no list
+        return queryset.none()
     
     
 
 class CustomerDetailView(generics.RetrieveUpdateAPIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [IsAuthenticated, IsSuperAdminOrManagerOrSelf]
     serializer_class = CustomerProfileSerializer
     queryset = User.objects.filter(role='customer').select_related('customerprofile').prefetch_related('customer_flags')
 
     def update(self, request, *args, **kwargs):
         user = self.get_object()
+
+        # Customer updating their own profile – only allow safe fields
+        if request.user.role == 'customer' and request.user == user:
+            allowed_fields = ['first_name', 'last_name', 'phone', 'email']
+            for field in allowed_fields:
+                if field in request.data:
+                    setattr(user, field, request.data[field])
+            user.save()
+            return Response({'message': 'Profile updated successfully'})
+
+        # Super admin / manager: update is_active (or other admin fields)
         is_active = request.data.get('is_active')
         if is_active is not None:
             user.is_active = bool(is_active)
             user.save()
+            return Response({'message': f"User {'blocked' if not is_active else 'unblocked'} successfully"})
+
         return Response({'message': 'User updated successfully'})
+    
+    
+class CustomerSelfProfileView(generics.RetrieveUpdateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = CustomerProfileSerializer
+
+    def get_object(self):
+        return self.request.user
+
+    def update(self, request, *args, **kwargs):
+        user = self.get_object()
+        # Only allow safe fields
+        allowed_fields = ['first_name', 'last_name', 'phone', 'email']
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(user, field, request.data[field])
+        user.save()
+        return Response({'message': 'Profile updated successfully'})
     
 
 class CustomerFlagCreateView(generics.CreateAPIView):
@@ -611,3 +662,53 @@ class CustomerToggleBlockView(generics.UpdateAPIView):
         user.is_active = bool(is_active)
         user.save()
         return Response({'message': f"User {'blocked' if not is_active else 'unblocked'} successfully"})
+    
+
+
+class CustomerFlagCreateView(generics.CreateAPIView):
+    permission_classes = [IsAuthenticated]  # remove IsSuperAdmin, we'll check manually
+    serializer_class = CustomerFlagSerializer
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        customer_id = self.kwargs.get('customer_id')
+        try:
+            customer = User.objects.get(id=customer_id, role='customer')
+        except User.DoesNotExist:
+            raise PermissionDenied("Customer not found")
+
+        # Allow super admin or manager (if customer belongs to their shop)
+        if user.role == 'super_admin':
+            pass
+        elif user.role == 'manager' and manager_can_access_customer(user, customer):
+            pass
+        else:
+            raise PermissionDenied("You are not allowed to flag this customer")
+
+        profile, _ = CustomerProfile.objects.get_or_create(user=customer)
+        serializer.save(customer=customer, flagged_by=user)
+        profile.is_flagged = True
+        profile.save()
+        
+
+class CustomerFlagDeleteView(generics.DestroyAPIView):
+    permission_classes = [IsAuthenticated]  # remove IsSuperAdmin
+
+    def delete(self, request, *args, **kwargs):
+        customer_id = kwargs.get('customer_id')
+        flag_id = kwargs.get('flag_id')
+        try:
+            flag = CustomerFlag.objects.get(id=flag_id, customer_id=customer_id)
+        except CustomerFlag.DoesNotExist:
+            return Response({'error': 'Flag not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        # Allow super admin or the flag creator (if manager)
+        if user.role == 'super_admin' or (user.role == 'manager' and flag.flagged_by == user):
+            flag.delete()
+            # Update profile if no flags remain
+            if not CustomerFlag.objects.filter(customer_id=customer_id).exists():
+                CustomerProfile.objects.filter(user_id=customer_id).update(is_flagged=False)
+            return Response({'message': 'Flag removed'}, status=status.HTTP_204_NO_CONTENT)
+        else:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)

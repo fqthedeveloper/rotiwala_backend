@@ -1,17 +1,13 @@
 from rest_framework import serializers
-from .models import User
-from .models import CustomerProfile, CustomerFlag, ManagerProfile
-
+from .models import User, CustomerProfile, CustomerFlag, ManagerProfile
 
 
 class UserSerializer(serializers.ModelSerializer):
-
     shop_id = serializers.SerializerMethodField()
     shop_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-
         fields = [
             "id",
             "username",
@@ -38,54 +34,6 @@ class UserSerializer(serializers.ModelSerializer):
             return None
 
 
-class CustomerProfileSerializer(serializers.ModelSerializer):
-
-    user = UserSerializer()
-
-    class Meta:
-        model = CustomerProfile
-        fields = "__all__"
-
-
-
-class ManagerSerializer(
-    serializers.ModelSerializer
-):
-
-    shop_name = serializers.SerializerMethodField()
-
-    class Meta:
-
-        model = User
-
-        fields = [
-            "id",
-            "first_name",
-            "last_name",
-            "phone",
-            "email",
-            "role",
-            "shop_name",
-        ]
-
-    def get_shop_name(
-        self,
-        obj
-    ):
-
-        try:
-
-            if obj.manager_profile.shop:
-                return obj.manager_profile.shop.name
-
-        except:
-            pass
-
-        return None
-    
-    
-
-
 class CustomerFlagSerializer(serializers.ModelSerializer):
     flagged_by_name = serializers.SerializerMethodField()
 
@@ -99,11 +47,7 @@ class CustomerFlagSerializer(serializers.ModelSerializer):
 
 class CustomerProfileSerializer(serializers.ModelSerializer):
     user_id = serializers.IntegerField(source='id')
-    username = serializers.CharField(source='username')
     full_name = serializers.SerializerMethodField()
-    phone = serializers.CharField(source='phone')
-    email = serializers.EmailField(source='email')
-    is_active = serializers.BooleanField(source='is_active')
     flags = CustomerFlagSerializer(many=True, read_only=True, source='customer_flags')
     trust_score = serializers.IntegerField(source='customerprofile.trust_score')
     total_orders = serializers.IntegerField(source='customerprofile.total_orders')
@@ -115,9 +59,21 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'user_id', 'username', 'full_name', 'phone', 'email',
-            'is_active', 'trust_score', 'total_orders', 'total_completed_orders',
-            'total_cancelled_orders', 'total_rejected_orders', 'is_flagged', 'flags'
+            'user_id',
+            'username',
+            'first_name',
+            'last_name',
+            'full_name',          # <-- Added
+            'phone',
+            'email',
+            'is_active',
+            'trust_score',
+            'total_orders',
+            'total_completed_orders',
+            'total_cancelled_orders',
+            'total_rejected_orders',
+            'is_flagged',
+            'flags'
         ]
 
     def get_full_name(self, obj):
@@ -129,7 +85,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
     trust_score = serializers.IntegerField(source='customerprofile.trust_score')
     total_orders = serializers.IntegerField(source='customerprofile.total_orders')
     is_flagged = serializers.BooleanField(source='customerprofile.is_flagged')
-    is_active = serializers.BooleanField()  # directly from User
+    is_active = serializers.BooleanField()          # directly from User
     flag_count = serializers.IntegerField(source='customer_flags.count')
 
     class Meta:
@@ -141,3 +97,27 @@ class CustomerListSerializer(serializers.ModelSerializer):
 
     def get_full_name(self, obj):
         return f"{obj.first_name} {obj.last_name}".strip() or obj.username
+
+
+class ManagerSerializer(serializers.ModelSerializer):
+    shop_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "first_name",
+            "last_name",
+            "phone",
+            "email",
+            "role",
+            "shop_name",
+        ]
+
+    def get_shop_name(self, obj):
+        try:
+            if obj.manager_profile.shop:
+                return obj.manager_profile.shop.name
+        except:
+            pass
+        return None

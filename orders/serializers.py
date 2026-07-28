@@ -35,9 +35,7 @@ class OrderSerializer(serializers.ModelSerializer):
     pickup_display = serializers.SerializerMethodField()
 
     class Meta:
-
         model = Order
-
         fields = "__all__"
 
     def get_customer_name(self, obj):

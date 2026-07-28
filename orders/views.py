@@ -61,6 +61,19 @@ from discounts.models import Discount, DiscountUsage                # <-- for us
 from discounts.coupon_models import CouponUsage            # <-- for coupon usage
 
 
+import math
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Calculate distance in km between two coordinates."""
+    R = 6371  # Earth radius in km
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat/2)**2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon/2)**2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
+
 # Add this function at the end of the file
 def orders_root(request):
     """
@@ -104,7 +117,35 @@ class PlaceOrderView(APIView):
             return Response({"error": "Cart Empty"}, status=400)
 
         # -------------------------------------------
-        # Payment & pickup
+        # Delivery option and address
+        # -------------------------------------------
+        delivery_option = request.data.get("delivery_option", "pickup")   # "pickup" or "delivery"
+        delivery_address = request.data.get("delivery_address", "").strip()
+        delivery_lat = request.data.get("delivery_latitude")
+        delivery_lng = request.data.get("delivery_longitude")
+
+        if delivery_option == "delivery":
+            if not delivery_address:
+                return Response({"error": "Delivery address is required"}, status=400)
+            if delivery_lat is None or delivery_lng is None:
+                return Response({"error": "Delivery latitude and longitude are required"}, status=400)
+
+            # Shop must have coordinates
+            if shop.latitude is None or shop.longitude is None:
+                return Response({"error": "Shop location is not set, cannot deliver"}, status=400)
+
+            distance = haversine(
+                float(shop.latitude), float(shop.longitude),
+                float(delivery_lat), float(delivery_lng)
+            )
+
+            if distance > 2.0:
+                return Response({
+                    "error": f"Shop is {distance:.2f} km away. We only deliver within 2 km."
+                }, status=400)
+
+        # -------------------------------------------
+        # Payment & pickup (only for pickup option)
         # -------------------------------------------
         payment_method = request.data.get("payment_method", "cash")
         pickup_type = request.data.get("pickup_type", "instant")
@@ -115,11 +156,13 @@ class PlaceOrderView(APIView):
         pickup_person_name = request.data.get("pickup_person_name", "")
         pickup_person_phone = request.data.get("pickup_person_phone", "")
 
-        if pickup_by_other_person:
-            if not pickup_person_name:
-                return Response({"error": "Pickup person name is required"}, status=400)
-            if not pickup_person_phone:
-                return Response({"error": "Pickup person phone is required"}, status=400)
+        # If delivery, ignore pickup fields
+        if delivery_option == "delivery":
+            pickup_type = "instant"
+            pickup_time = None
+            pickup_by_other_person = False
+            pickup_person_name = ""
+            pickup_person_phone = ""
 
         if pickup_type not in ("instant", "scheduled"):
             return Response({"error": "Invalid pickup type."}, status=400)
@@ -135,6 +178,9 @@ class PlaceOrderView(APIView):
                 parsed_pickup_time = timezone.make_aware(parsed_pickup_time)
             if parsed_pickup_time <= timezone.now():
                 return Response({"error": "Pickup time must be in the future."}, status=400)
+
+        # If delivery, we might want to add a delivery fee later
+        # For now, we set delivery_fee=0
 
         # -------------------------------------------
         # Determine selected promotion
@@ -198,10 +244,16 @@ class PlaceOrderView(APIView):
             pickup_by_other_person=pickup_by_other_person,
             pickup_person_name=pickup_person_name,
             pickup_person_phone=pickup_person_phone,
+            # New fields
+            delivery_option=delivery_option,
+            delivery_address=delivery_address if delivery_option == "delivery" else "",
+            delivery_latitude=delivery_lat if delivery_option == "delivery" else None,
+            delivery_longitude=delivery_lng if delivery_option == "delivery" else None,
+            delivery_fee=Decimal("0.00"),  # adjust as needed
         )
 
         # ============================================
-        # 4. Process the cart with OfferEngine (rounding applied)
+        # 4. Process the cart with OfferEngine
         # ============================================
         engine = OfferEngine(
             customer=request.user,
@@ -210,15 +262,12 @@ class PlaceOrderView(APIView):
             forced_discount=selected_discount,
         )
 
-        # Get the full cart calculation (includes rounded totals and adjusted item discounts)
         cart_result = engine.calculate_cart(cart_items)
 
-        # Use the rounded/aggregated totals
         original_amount = cart_result["original_total"]
         discount_amount = cart_result["discount_total"]
         final_amount = cart_result["final_total"]
 
-        # Create order items using the adjusted discounts from the cart result
         for item_result in cart_result["items"]:
             offer = item_result["offer"]
             cart_item = item_result["item"]
@@ -228,17 +277,17 @@ class PlaceOrderView(APIView):
                 discount=offer.discount,
                 item_name=cart_item.menu_item.name,
                 original_price=offer.original_price,
-                discount_amount=offer.discount_amount,   # already adjusted proportionally
-                final_price=offer.final_price,           # adjusted
+                discount_amount=offer.discount_amount,
+                final_price=offer.final_price,
                 quantity=cart_item.quantity,
-                total_price=offer.final_price,           # total price per item (already multiplied by quantity)
+                total_price=offer.final_price,
                 discount_name=offer.discount_name,
                 discount_percentage=offer.discount_value if offer.discount_type == "percentage" else None,
                 promotion_type=offer.promotion_type,
             )
 
         # ============================================
-        # 5. Save totals & promotion info on the order
+        # 5. Save totals & promotion info
         # ============================================
         order.original_amount = original_amount
         order.discount_amount = discount_amount
@@ -251,14 +300,14 @@ class PlaceOrderView(APIView):
             order.discount_name = selected_discount.name
         elif selected_coupon:
             order.promotion_type = "coupon"
-            # optionally add coupon code field if you have one
+            # optionally add coupon code field
         else:
             order.promotion_type = "none"
 
         order.save()
 
         # ============================================
-        # 6. Record usage (one‑time per customer)
+        # 6. Record usage
         # ============================================
         if selected_discount:
             try:
@@ -302,7 +351,7 @@ class PlaceOrderView(APIView):
         profile.save()
 
         # ============================================
-        # 8. Notify the shop manager
+        # 8. Notify shop manager
         # ============================================
         manager = User.objects.filter(
             role="manager",
@@ -332,8 +381,8 @@ class PlaceOrderView(APIView):
             "order_id": order.id,
             "order_number": order.order_number,
             "total_amount": order.total_amount,
-            "pickup_type": order.pickup_type,
-            "pickup_time": order.pickup_time,
+            "delivery_option": order.delivery_option,
+            "delivery_address": order.delivery_address,
             "estimated_minutes": order.estimated_minutes,
             "estimated_ready_time": order.estimated_ready_time,
             "queue_count": active_orders,

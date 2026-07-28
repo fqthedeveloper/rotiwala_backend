@@ -37,6 +37,11 @@ class Order(models.Model):
         ("discount", "Discount"),
         ("coupon", "Coupon"),
     )
+    
+    DELIVERY_OPTIONS = (
+        ('pickup', 'Pay at Shop'),
+        ('delivery', 'Home Delivery'),
+    )
 
     order_number = models.CharField(
         max_length=30,
@@ -161,6 +166,40 @@ class Order(models.Model):
         blank=True,
         null=True
     )
+    
+    delivery_option = models.CharField(
+        max_length=20,
+        choices=DELIVERY_OPTIONS,
+        default='pickup',
+    )
+
+    delivery_address = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Full delivery address (only for delivery option)"
+    )
+    delivery_latitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+    )
+
+    delivery_longitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+    )
+
+    # Optional: delivery fee
+    delivery_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Delivery fee if applicable"
+    )
+
 
     ordered_at = models.DateTimeField(
         auto_now_add=True
