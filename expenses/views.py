@@ -23,7 +23,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from .models import ExpenseEntry, ExpenseItemEntry, ExpenseCategory, MaintenanceExpense
 from .serializers import ExpenseEntrySerializer, MaintenanceExpenseSerializer, ExpenseCategorySerializer
-from accounts.permissions import IsSuperAdmin
+from accounts.permissions import IsSuperAdmin 
+from rest_framework import serializers
+from rest_framework.exceptions import ValidationError
+from django.shortcuts import get_object_or_404
+from shops.models import Shop  # adjust import to your actual Shop model
 
 
 
@@ -119,26 +123,36 @@ class CreateExpenseEntryView(APIView):
         })
         
         
-class MaintenanceCreateView(
-    generics.CreateAPIView
-):
+class MaintenanceCreateView(generics.CreateAPIView):
+    serializer_class = MaintenanceExpenseSerializer
+    queryset = MaintenanceExpense.objects.all()
+    permission_classes = [IsAuthenticated]   # or combine (IsSuperAdmin | IsManager)
 
-    serializer_class = (
-        MaintenanceExpenseSerializer
-    )
+    def perform_create(self, serializer):
+        user = self.request.user
 
-    queryset = (
-        MaintenanceExpense.objects.all()
-    )
+        if user.role == 'manager':
+            # Use the manager's own shop
+            try:
+                shop = user.manager_profile.shop
+            except AttributeError:
+                raise ValidationError({"detail": "Manager profile has no shop."})
+            # Force the shop; ignore any value the client might have sent
+            serializer.save(shop=shop, created_by=user)
 
-    def perform_create(
-        self,
-        serializer
-    ):
+        elif user.role == 'super_admin':
+            shop_id = self.request.data.get('shop')
+            if not shop_id:
+                # Optional: assign the first shop as a fallback
+                shop = Shop.objects.first()
+                if not shop:
+                    raise ValidationError({"detail": "No shops exist."})
+            else:
+                shop = get_object_or_404(Shop, id=shop_id)
+            serializer.save(shop=shop, created_by=user)
 
-        serializer.save(
-            created_by=self.request.user
-        )
+        else:
+            raise ValidationError({"detail": "You are not allowed to create maintenance expenses."})
         
 
 

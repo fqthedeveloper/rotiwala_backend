@@ -41,7 +41,9 @@ class ExpenseItemEntrySerializer(
 class ExpenseEntrySerializer(
     serializers.ModelSerializer
 ):
-
+    category = ExpenseCategorySerializer(
+        read_only=True
+    )
     expense_items = ExpenseItemEntrySerializer(
         many=True,
         read_only=True
@@ -50,6 +52,7 @@ class ExpenseEntrySerializer(
     class Meta:
         model = ExpenseEntry
         fields = "__all__"
+        deepth = 2
 
 
 class MaintenanceExpenseSerializer(
@@ -59,3 +62,6 @@ class MaintenanceExpenseSerializer(
     class Meta:
         model = MaintenanceExpense
         fields = "__all__"
+        extra_kwargs = {
+            'shop': {'required': False},   # <-- add this
+        }

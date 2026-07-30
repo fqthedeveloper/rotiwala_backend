@@ -40,9 +40,12 @@ class CustomerFlagSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomerFlag
         fields = ['id', 'reason', 'created_at', 'flagged_by', 'flagged_by_name']
+        read_only_fields = ['id', 'created_at', 'flagged_by']
 
     def get_flagged_by_name(self, obj):
-        return f"{obj.flagged_by.first_name} {obj.flagged_by.last_name}" if obj.flagged_by else "System"
+        if obj.flagged_by:
+            return f"{obj.flagged_by.first_name} {obj.flagged_by.last_name}".strip()
+        return "System"
 
 
 class CustomerProfileSerializer(serializers.ModelSerializer):

@@ -52,7 +52,8 @@ INSTALLED_APPS = [
     "notifications",
     "reports",
     "contact",
-    "discounts"
+    "discounts",
+    'django_extensions',
 ]
 
 MIDDLEWARE = [

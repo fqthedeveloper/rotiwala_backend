@@ -560,7 +560,24 @@ class CustomerListView(generics.ListAPIView):
         # Customer role: no list
         return queryset.none()
     
-    
+ 
+class CustomerSelfProfileView(generics.RetrieveUpdateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = CustomerProfileSerializer
+
+    def get_object(self):
+        return self.request.user
+
+    def update(self, request, *args, **kwargs):
+        user = self.get_object()
+        # Only allow safe fields
+        allowed_fields = ['first_name', 'last_name', 'phone', 'email']
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(user, field, request.data[field])
+        user.save()
+        return Response({'message': 'Profile updated successfully'})
+       
 
 class CustomerDetailView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated, IsSuperAdminOrManagerOrSelf]
@@ -589,91 +606,26 @@ class CustomerDetailView(generics.RetrieveUpdateAPIView):
         return Response({'message': 'User updated successfully'})
     
     
-class CustomerSelfProfileView(generics.RetrieveUpdateAPIView):
+def manager_can_access_customer(manager_user, customer_user):
+    # Determine shop
+    shop = None
+    if hasattr(manager_user, 'managerprofile') and manager_user.managerprofile:
+        shop = manager_user.managerprofile.shop
+    elif hasattr(manager_user, 'shop') and manager_user.shop:
+        shop = manager_user.shop
+    elif hasattr(manager_user, 'shop_id') and manager_user.shop_id:
+        try:
+            shop = Shop.objects.get(id=manager_user.shop_id)
+        except Shop.DoesNotExist:
+            shop = None
+    if not shop:
+        return False
+    # ✅ Correct field: 'customer' – NOT 'user'
+    return Order.objects.filter(customer=customer_user, shop=shop).exists()
+
+
+class CustomerFlagCreateView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = CustomerProfileSerializer
-
-    def get_object(self):
-        return self.request.user
-
-    def update(self, request, *args, **kwargs):
-        user = self.get_object()
-        # Only allow safe fields
-        allowed_fields = ['first_name', 'last_name', 'phone', 'email']
-        for field in allowed_fields:
-            if field in request.data:
-                setattr(user, field, request.data[field])
-        user.save()
-        return Response({'message': 'Profile updated successfully'})
-    
-
-class CustomerFlagCreateView(generics.CreateAPIView):
-    """
-    POST /api/accounts/customers/<id>/flag/
-    Body: { "reason": "..." }
-    Super admin only.
-    """
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
-    serializer_class = CustomerFlagSerializer
-
-    def perform_create(self, serializer):
-        user_id = self.kwargs.get('customer_id')
-        customer = User.objects.get(id=user_id, role='customer')
-        profile, _ = CustomerProfile.objects.get_or_create(user=customer)
-        # Create flag
-        serializer.save(customer=customer, flagged_by=self.request.user)
-        # Update profile is_flagged = True
-        profile.is_flagged = True
-        profile.save()
-
-
-class CustomerFlagDeleteView(generics.DestroyAPIView):
-    """
-    DELETE /api/accounts/customers/<id>/flag/<flag_id>/
-    Super admin only.
-    """
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
-
-    def delete(self, request, *args, **kwargs):
-        customer_id = kwargs.get('customer_id')
-        flag_id = kwargs.get('flag_id')
-        try:
-            flag = CustomerFlag.objects.get(id=flag_id, customer_id=customer_id)
-            flag.delete()
-            # Check if any flags remain
-            remaining = CustomerFlag.objects.filter(customer_id=customer_id).exists()
-            if not remaining:
-                CustomerProfile.objects.filter(user_id=customer_id).update(is_flagged=False)
-            return Response({'message': 'Flag removed'}, status=status.HTTP_204_NO_CONTENT)
-        except CustomerFlag.DoesNotExist:
-            return Response({'error': 'Flag not found'}, status=status.HTTP_404_NOT_FOUND)
-
-
-class CustomerToggleBlockView(generics.UpdateAPIView):
-    """
-    PATCH /api/accounts/customers/<id>/toggle-block/
-    Body: { "is_active": true/false }
-    Super admin only.
-    """
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
-
-    def patch(self, request, *args, **kwargs):
-        user_id = kwargs.get('customer_id')
-        try:
-            user = User.objects.get(id=user_id, role='customer')
-        except User.DoesNotExist:
-            return Response({'error': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
-        is_active = request.data.get('is_active')
-        if is_active is None:
-            return Response({'error': 'is_active field required'}, status=status.HTTP_400_BAD_REQUEST)
-        user.is_active = bool(is_active)
-        user.save()
-        return Response({'message': f"User {'blocked' if not is_active else 'unblocked'} successfully"})
-    
-
-
-class CustomerFlagCreateView(generics.CreateAPIView):
-    permission_classes = [IsAuthenticated]  # remove IsSuperAdmin, we'll check manually
     serializer_class = CustomerFlagSerializer
 
     def perform_create(self, serializer):
@@ -684,22 +636,25 @@ class CustomerFlagCreateView(generics.CreateAPIView):
         except User.DoesNotExist:
             raise PermissionDenied("Customer not found")
 
-        # Allow super admin or manager (if customer belongs to their shop)
-        if user.role == 'super_admin':
-            pass
-        elif user.role == 'manager' and manager_can_access_customer(user, customer):
-            pass
-        else:
+        # Authorization – allow super_admin and all managers
+        if user.role not in ['super_admin', 'manager']:
             raise PermissionDenied("You are not allowed to flag this customer")
 
+        # Update profile
         profile, _ = CustomerProfile.objects.get_or_create(user=customer)
-        serializer.save(customer=customer, flagged_by=user)
         profile.is_flagged = True
         profile.save()
-        
+
+        # Create the flag
+        serializer.save(customer=customer, flagged_by=user)
+
 
 class CustomerFlagDeleteView(generics.DestroyAPIView):
-    permission_classes = [IsAuthenticated]  # remove IsSuperAdmin
+    """
+    DELETE /api/accounts/customers/<customer_id>/flag/<flag_id>/
+    Allows super_admin or the manager who created the flag.
+    """
+    permission_classes = [IsAuthenticated]
 
     def delete(self, request, *args, **kwargs):
         customer_id = kwargs.get('customer_id')
@@ -710,16 +665,46 @@ class CustomerFlagDeleteView(generics.DestroyAPIView):
             return Response({'error': 'Flag not found'}, status=status.HTTP_404_NOT_FOUND)
 
         user = request.user
-        # Allow super admin or the flag creator (if manager)
+        # Allow super_admin or the original flag creator (if manager)
         if user.role == 'super_admin' or (user.role == 'manager' and flag.flagged_by == user):
             flag.delete()
-            # Update profile if no flags remain
+            # If no more flags, update profile
             if not CustomerFlag.objects.filter(customer_id=customer_id).exists():
                 CustomerProfile.objects.filter(user_id=customer_id).update(is_flagged=False)
             return Response({'message': 'Flag removed'}, status=status.HTTP_204_NO_CONTENT)
         else:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
-        
+
+
+class CustomerToggleBlockView(generics.UpdateAPIView):
+    """
+    PATCH /api/accounts/customers/<customer_id>/toggle-block/
+    Body: { "is_active": true/false }
+    Super admin only.
+    """
+    permission_classes = [IsAuthenticated]  # additional check inside
+
+    def patch(self, request, *args, **kwargs):
+        user_id = kwargs.get('customer_id')
+        try:
+            customer = User.objects.get(id=user_id, role='customer')
+        except User.DoesNotExist:
+            return Response({'error': 'Customer not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Super admin only
+        if request.user.role != 'super_admin':
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+        is_active = request.data.get('is_active')
+        if is_active is None:
+            return Response({'error': 'is_active field required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        customer.is_active = bool(is_active)
+        customer.save()
+        return Response({
+            'message': f"User {'blocked' if not is_active else 'unblocked'} successfully",
+            'is_active': customer.is_active
+        })        
         
         
 # ---------- Super Admin Dashboard Stats ----------
