@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     "contact",
     "discounts",
     'django_extensions',
+    "whatsapp",
 ]
 
 MIDDLEWARE = [
@@ -203,3 +204,17 @@ CHANNEL_LAYERS = {
 #         },
 #     },
 # }
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()   # looks for .env in the project root
+
+# WhatsApp Cloud API
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET")
+WHATSAPP_BASE_URL = os.getenv("WHATSAPP_BASE_URL", "https://graph.facebook.com/v25.0")

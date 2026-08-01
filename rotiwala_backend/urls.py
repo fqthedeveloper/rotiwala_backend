@@ -68,6 +68,7 @@ urlpatterns = [
             "discounts.coupon_urls"
         )
     ),
+    path('api/whatsapp/', include('whatsapp.urls')),
 
     ]
 

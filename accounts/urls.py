@@ -20,6 +20,10 @@ from .views import (
     SuperAdminRevenueTrendView,
     SuperAdminOrdersByShopView,
     SuperAdminTopProductsView,
+    SendOTPView,
+    TestWhatsAppView,
+    VerifyOTPView,
+
     
 )
 
@@ -40,6 +44,9 @@ urlpatterns = [
         PasswordLoginView.as_view()
     ),
 
+    path('send-otp/', SendOTPView.as_view(), name='send-otp'),
+    path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
+    path('test-whatsapp/', TestWhatsAppView.as_view()),
 
     path(
         "save-fcm-token/",

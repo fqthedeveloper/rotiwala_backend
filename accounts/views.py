@@ -1,5 +1,3 @@
-from firebase_admin import auth
-
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -21,9 +19,108 @@ from shops.models import Shop
 from menu.models import MenuItem
 from accounts.models import User, CustomerProfile
 from django.db.models.functions import TruncDate
+from firebase_admin import auth
+from whatsapp.services import WhatsAppService
+import random
+from django.core.cache import cache
+import logging
+# accounts/views.py
+
+import random
+from rest_framework import status
+from whatsapp.services import WhatsAppService
+import logging
+
+logger = logging.getLogger(__name__)
+
+# accounts/views.py
+class SendOTPView(APIView):
+    permission_classes = []
+
+    def post(self, request):
+        phone = request.data.get("phone")
+        if not phone:
+            return Response({"error": "Phone number required."}, status=400)
+
+        otp = random.randint(100000, 999999)
+        cache.set(f"otp_{phone}", otp, timeout=300)
+
+        try:
+            result = WhatsAppService.send_otp(phone, str(otp))
+            return Response({"message": "OTP sent to your WhatsApp."}, status=200)
+        except Exception as e:
+            error_msg = str(e)
+            # This will now contain the full HTTP error
+            return Response({"error": error_msg}, status=500)
 
 
+class VerifyOTPView(APIView):
+    permission_classes = []
 
+    def post(self, request):
+        phone = request.data.get("phone")
+        otp = request.data.get("otp")
+        first_name = request.data.get("first_name", "")
+        last_name = request.data.get("last_name", "")
+        password = request.data.get("password")  # optional
+
+        if not phone or not otp:
+            return Response(
+                {"error": "Phone and OTP are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        cached_otp = cache.get(f"otp_{phone}")
+        if not cached_otp or str(cached_otp) != str(otp):
+            return Response(
+                {"error": "Invalid or expired OTP."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        cache.delete(f"otp_{phone}")
+
+        try:
+            user = User.objects.get(phone=phone)
+            # Login
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                "message": "Login successful.",
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+                "user": UserSerializer(user).data
+            }, status=status.HTTP_200_OK)
+
+        except User.DoesNotExist:
+            # Register new user
+            user = User.objects.create_user(
+                username=phone,
+                phone=phone,
+                first_name=first_name,
+                last_name=last_name,
+                password=password,
+                firebase_uid=None,
+                role="customer",
+                is_phone_verified=True
+            )
+            CustomerProfile.objects.create(user=user)
+
+            # Send welcome
+            try:
+                WhatsAppService.send_welcome(
+                    phone=user.phone,
+                    customer_name=f"{user.first_name} {user.last_name}".strip() or "Customer"
+                )
+            except Exception as e:
+                logger.warning(f"Welcome WhatsApp failed: {e}")
+
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                "message": "Registration successful.",
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+                "user": UserSerializer(user).data
+            }, status=status.HTTP_201_CREATED)
+       
 
 class CustomerRegisterView(APIView):
 
@@ -316,6 +413,36 @@ class PasswordLoginView(APIView):
             status=status.HTTP_200_OK
         )
 
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from whatsapp.services import WhatsAppService
+import requests
+
+class TestWhatsAppView(APIView):
+    permission_classes = []
+
+    def get(self, request):
+        phone = request.query_params.get("phone", "+917776062165")
+        url = f"{WhatsAppService.BASE_URL}/{WhatsAppService.PHONE_NUMBER_ID}/messages"
+        headers = {
+            "Authorization": f"Bearer {WhatsAppService.ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "text",
+            "text": {"body": "Test message from Rotiwaale – credentials work!"}
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=10)
+            resp.raise_for_status()
+            return Response({"success": True, "data": resp.json()})
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
 
 class SaveFCMTokenView(APIView):
 
