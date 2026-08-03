@@ -8,6 +8,7 @@ from rest_framework import status
 from decimal import Decimal
 from django.db import IntegrityError
 from django.utils.dateparse import parse_datetime
+from whatsapp.services import WhatsAppService   
 
 
 from accounts.models import (
@@ -90,13 +91,17 @@ def orders_root(request):
     })
     
 
+# ==========================================
+# PLACE ORDER VIEW (UPDATED)
+# ==========================================
+
 class PlaceOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     @transaction.atomic
     def post(self, request):
         # ============================================
-        # 1. Validate basic inputs
+        # 1. Validate basic inputs (unchanged)
         # ============================================
         shop_id = request.data.get("shop_id")
         if not shop_id:
@@ -119,7 +124,7 @@ class PlaceOrderView(APIView):
         # -------------------------------------------
         # Delivery option and address
         # -------------------------------------------
-        delivery_option = request.data.get("delivery_option", "pickup")   # "pickup" or "delivery"
+        delivery_option = request.data.get("delivery_option", "pickup")
         delivery_address = request.data.get("delivery_address", "").strip()
         delivery_lat = request.data.get("delivery_latitude")
         delivery_lng = request.data.get("delivery_longitude")
@@ -129,34 +134,28 @@ class PlaceOrderView(APIView):
                 return Response({"error": "Delivery address is required"}, status=400)
             if delivery_lat is None or delivery_lng is None:
                 return Response({"error": "Delivery latitude and longitude are required"}, status=400)
-
-            # Shop must have coordinates
             if shop.latitude is None or shop.longitude is None:
                 return Response({"error": "Shop location is not set, cannot deliver"}, status=400)
-
             distance = haversine(
                 float(shop.latitude), float(shop.longitude),
                 float(delivery_lat), float(delivery_lng)
             )
-
             if distance > 2.0:
                 return Response({
                     "error": f"Shop is {distance:.2f} km away. We only deliver within 2 km."
                 }, status=400)
 
         # -------------------------------------------
-        # Payment & pickup (only for pickup option)
+        # Payment & pickup
         # -------------------------------------------
         payment_method = request.data.get("payment_method", "cash")
         pickup_type = request.data.get("pickup_type", "instant")
         pickup_time = request.data.get("pickup_time")
         notes = request.data.get("notes", "")
-
         pickup_by_other_person = request.data.get("pickup_by_other_person", False)
         pickup_person_name = request.data.get("pickup_person_name", "")
         pickup_person_phone = request.data.get("pickup_person_phone", "")
 
-        # If delivery, ignore pickup fields
         if delivery_option == "delivery":
             pickup_type = "instant"
             pickup_time = None
@@ -179,11 +178,8 @@ class PlaceOrderView(APIView):
             if parsed_pickup_time <= timezone.now():
                 return Response({"error": "Pickup time must be in the future."}, status=400)
 
-        # If delivery, we might want to add a delivery fee later
-        # For now, we set delivery_fee=0
-
         # -------------------------------------------
-        # Determine selected promotion
+        # Promotion selection
         # -------------------------------------------
         promotion_type = request.data.get("promotion_type")
         promotion_id = request.data.get("promotion_id")
@@ -244,12 +240,11 @@ class PlaceOrderView(APIView):
             pickup_by_other_person=pickup_by_other_person,
             pickup_person_name=pickup_person_name,
             pickup_person_phone=pickup_person_phone,
-            # New fields
             delivery_option=delivery_option,
             delivery_address=delivery_address if delivery_option == "delivery" else "",
             delivery_latitude=delivery_lat if delivery_option == "delivery" else None,
             delivery_longitude=delivery_lng if delivery_option == "delivery" else None,
-            delivery_fee=Decimal("0.00"),  # adjust as needed
+            delivery_fee=Decimal("0.00"),
         )
 
         # ============================================
@@ -300,7 +295,6 @@ class PlaceOrderView(APIView):
             order.discount_name = selected_discount.name
         elif selected_coupon:
             order.promotion_type = "coupon"
-            # optionally add coupon code field
         else:
             order.promotion_type = "none"
 
@@ -351,13 +345,14 @@ class PlaceOrderView(APIView):
         profile.save()
 
         # ============================================
-        # 8. Notify shop manager
+        # 8. Notify shop manager (PUSH + WHATSAPP)
         # ============================================
         manager = User.objects.filter(
             role="manager",
             manager_profile__shop=shop
         ).first()
 
+        # Push notification (existing)
         if manager and manager.fcm_token:
             send_push_notification(
                 token=manager.fcm_token,
@@ -369,6 +364,18 @@ class PlaceOrderView(APIView):
                     "shop_id": str(shop.id),
                 }
             )
+
+        # ✅ WhatsApp notification to manager
+        if manager and manager.phone:
+            try:
+                WhatsAppService.send_manager_new_order(
+                    manager_phone=manager.phone,
+                    order_id=order.order_number,
+                    customer_name=order.customer_name,
+                    total=str(order.total_amount)
+                )
+            except Exception as e:
+                logger.warning(f"Manager WhatsApp notification failed: {e}")
 
         # ============================================
         # 9. Clear the cart
@@ -443,24 +450,22 @@ class ManagerOrdersView(APIView):
         )
 
 
-class AcceptOrderView(APIView):
+# ==========================================
+# ACCEPT ORDER VIEW (UPDATED WITH WHATSAPP)
+# ==========================================
 
+class AcceptOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-
         order = Order.objects.get(id=pk)
-
         order.status = "accepted"
         order.accepted_at = timezone.now()
         order.save()
         send_order_update(order)
 
-        if (
-            order.customer and
-            order.customer.fcm_token
-        ):
-
+        # Push notification to customer
+        if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
                 title="Order Accepted",
@@ -472,50 +477,47 @@ class AcceptOrderView(APIView):
                 }
             )
 
-        return Response(
-            {
-                "message": "Order Accepted"
-            }
-        )
+        # ✅ WhatsApp notification to customer
+        if order.customer and order.customer.phone:
+            try:
+                WhatsAppService.send_order_accepted(
+                    customer_phone=order.customer.phone,
+                    order_id=order.order_number,
+                    shop_name=order.shop.name
+                )
+            except Exception as e:
+                logger.warning(f"Order accepted WhatsApp failed: {e}")
 
+        return Response({"message": "Order Accepted"})
+
+
+
+# ==========================================
+# REJECT ORDER VIEW (UPDATED WITH WHATSAPP)
+# ==========================================
 
 class RejectOrderView(APIView):
-
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-
-        reason = request.data.get(
-            "reason",
-            "Order rejected"
-        )
-
+        reason = request.data.get("reason", "Order rejected")
         order = Order.objects.get(id=pk)
-
         order.status = "rejected"
         order.rejection_reason = reason
         order.save()
         send_order_update(order)
 
+        # Update customer profile (trust score)
         if order.customer:
-
-            profile = CustomerProfile.objects.get(
-                user=order.customer
-            )
-
+            profile = CustomerProfile.objects.get(user=order.customer)
             profile.total_rejected_orders += 1
             profile.trust_score -= 3
-
             if profile.trust_score < 50:
                 profile.is_flagged = True
-
             profile.save()
 
-        if (
-            order.customer and
-            order.customer.fcm_token
-        ):
-
+        # Push notification to customer
+        if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
                 title="Order Rejected",
@@ -527,11 +529,18 @@ class RejectOrderView(APIView):
                 }
             )
 
-        return Response(
-            {
-                "message": "Order Rejected"
-            }
-        )
+        # ✅ WhatsApp notification to customer
+        if order.customer and order.customer.phone:
+            try:
+                WhatsAppService.send_order_rejected(
+                    customer_phone=order.customer.phone,
+                    order_id=order.order_number,
+                    reason=reason
+                )
+            except Exception as e:
+                logger.warning(f"Order rejected WhatsApp failed: {e}")
+
+        return Response({"message": "Order Rejected"})
 
 
 class PreparingOrderView(APIView):
@@ -553,23 +562,22 @@ class PreparingOrderView(APIView):
         )
 
 
-class ReadyOrderView(APIView):
+# ==========================================
+# READY ORDER VIEW (UPDATED WITH WHATSAPP)
+# ==========================================
 
+class ReadyOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-
         order = Order.objects.get(id=pk)
-
         order.status = "ready"
         order.ready_at = timezone.now()
         order.save()
         send_order_update(order)
-        if (
-            order.customer and
-            order.customer.fcm_token
-        ):
 
+        # Push notification to customer
+        if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
                 title="Order Ready",
@@ -581,11 +589,19 @@ class ReadyOrderView(APIView):
                 }
             )
 
-        return Response(
-            {
-                "message": "Order Ready"
-            }
-        )
+        # ✅ WhatsApp notification to customer
+        if order.customer and order.customer.phone:
+            pickup_time = order.estimated_ready_time.strftime("%I:%M %p") if order.estimated_ready_time else "soon"
+            try:
+                WhatsAppService.send_order_ready(
+                    customer_phone=order.customer.phone,
+                    order_id=order.order_number,
+                    pickup_time=pickup_time
+                )
+            except Exception as e:
+                logger.warning(f"Order ready WhatsApp failed: {e}")
+
+        return Response({"message": "Order Ready"})
 
 
 class CollectedOrderView(APIView):
@@ -633,51 +649,47 @@ class CollectedOrderView(APIView):
         )
 
 
-class CancelOrderView(APIView):
+# ==========================================
+# CANCEL ORDER VIEW (UPDATED WITH WHATSAPP)
+# ==========================================
 
+class CancelOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
+        order = Order.objects.get(id=pk, customer=request.user)
 
-        order = Order.objects.get(
-            id=pk,
-            customer=request.user
-        )
-
-        if order.status not in [
-            "pending",
-            "accepted"
-        ]:
-
-            return Response(
-                {
-                    "error": "Cannot cancel"
-                },
-                status=400
-            )
+        if order.status not in ["pending", "accepted"]:
+            return Response({"error": "Cannot cancel"}, status=400)
 
         order.status = "cancelled"
         order.save()
-
         send_order_update(order)
 
-        profile = CustomerProfile.objects.get(
-            user=request.user
-        )
-
+        # Update customer profile
+        profile = CustomerProfile.objects.get(user=request.user)
         profile.total_cancelled_orders += 1
         profile.trust_score -= 10
-
         if profile.trust_score < 50:
             profile.is_flagged = True
-
         profile.save()
 
-        return Response(
-            {
-                "message": "Order Cancelled"
-            }
-        )
+        # ✅ Notify manager via WhatsApp (if cancelled by customer)
+        manager = User.objects.filter(
+            role="manager",
+            manager_profile__shop=order.shop
+        ).first()
+        if manager and manager.phone:
+            try:
+                WhatsAppService.send_manager_order_cancelled(
+                    manager_phone=manager.phone,
+                    order_id=order.order_number,
+                    customer_name=order.customer_name
+                )
+            except Exception as e:
+                logger.warning(f"Manager cancellation WhatsApp failed: {e}")
+
+        return Response({"message": "Order Cancelled"})
 
 
 
@@ -994,146 +1006,75 @@ from accounts.models import User, CustomerProfile
 
 
 def get_or_create_customer(phone, name):
-
+    """
+    Returns (customer, created) where created is True if a new customer was made.
+    """
     if not phone:
-        return None
+        return None, False
 
     # ---------------------------------------
     # Normalize Phone
     # ---------------------------------------
-
-    phone = (
-        phone.strip()
-        .replace(" ", "")
-        .replace("-", "")
-    )
-
+    phone = phone.strip().replace(" ", "").replace("-", "")
     if phone.startswith("+91"):
         clean_phone = phone[3:]
-
     elif phone.startswith("91"):
         clean_phone = phone[2:]
-
     else:
         clean_phone = phone
 
     full_phone = "+91" + clean_phone
-
-    possible_numbers = [
-
-        clean_phone,
-
-        "91" + clean_phone,
-
-        full_phone,
-
-    ]
+    possible_numbers = [clean_phone, "91" + clean_phone, full_phone]
 
     # ---------------------------------------
-    # Existing Customer
+    # Try to find existing customer
     # ---------------------------------------
-
-    customer = (
-
-        User.objects
-
-        .filter(
-
-            role="customer",
-
-            phone__in=possible_numbers,
-
-        )
-
-        .first()
-
-    )
-
+    customer = User.objects.filter(role="customer", phone__in=possible_numbers).first()
     if customer:
-
         CustomerProfile.objects.get_or_create(
-
             user=customer,
-
-            defaults={
-
-                "trust_score": 100,
-
-                "total_orders": 0,
-
-            }
-
+            defaults={"trust_score": 100, "total_orders": 0}
         )
-
-        return customer
+        return customer, False
 
     # ---------------------------------------
-    # Create Customer
+    # Create new customer (with lock)
     # ---------------------------------------
-
     with transaction.atomic():
-
-        customer = (
-
-            User.objects
-
-            .select_for_update()
-
-            .filter(
-
-                role="customer",
-
-                phone__in=possible_numbers,
-
-            )
-
-            .first()
-
-        )
-
+        customer = User.objects.select_for_update().filter(
+            role="customer", phone__in=possible_numbers
+        ).first()
         if customer:
-
             CustomerProfile.objects.get_or_create(
-
                 user=customer,
-
-                defaults={
-
-                    "trust_score": 100,
-
-                    "total_orders": 0,
-
-                }
-
+                defaults={"trust_score": 100, "total_orders": 0}
             )
+            return customer, False
 
-            return customer
-
+        # Generate unique username
         username = clean_phone
-
         counter = 1
-
         while User.objects.filter(username=username).exists():
-
             username = f"{clean_phone}_{counter}"
-
             counter += 1
 
         customer = User(
-
             username=username,
-
-            first_name=name or "Walk-In Customer",
-
+            first_name=name or "Walk‑In Customer",
             phone=full_phone,
-
             role="customer",
-
             is_active=True,
-
             is_phone_verified=True,
-
         )
+        customer.set_password(clean_phone)  # default password = phone number
+        customer.save()
+
+        CustomerProfile.objects.create(
+            user=customer,
+            trust_score=100,
+            total_orders=0,
+        )
+        return customer, True
 
         # ---------------------------------------
         # Default Password = Mobile Number
@@ -1855,6 +1796,24 @@ class PlaceWalkInCartView(APIView):
         if not cart.items.exists():
             return Response({"error": "Cart is empty"}, status=400)
 
+        # ---------------------------------------------
+        # Get or create customer from cart data
+        # ---------------------------------------------
+        customer, created = get_or_create_customer(
+            cart.customer_phone,
+            cart.customer_name
+        )
+
+        # ✅ If a new customer was created, send WhatsApp welcome
+        if created and customer and customer.phone:
+            try:
+                WhatsAppService.send_welcome(
+                    phone=customer.phone,
+                    customer_name=customer.first_name or "Customer"
+                )
+            except Exception as e:
+                logger.warning(f"Welcome WhatsApp failed for {customer.phone}: {e}")
+
         # Payment status
         payment_status = request.data.get("payment_status", "unpaid")
         if payment_status not in ["paid", "unpaid"]:
@@ -1886,15 +1845,12 @@ class PlaceWalkInCartView(APIView):
             # Ignore coupon if discount is manually selected
             coupon_code = None
 
-        # Customer may be None for anonymous walk‑in
-        customer = cart.customer
-
         # ========================================================
         # 3. Create the order skeleton
         # ========================================================
         order = Order.objects.create(
             order_number=generate_walkin_order_number(cart.shop),
-            customer=customer,
+            customer=customer,   # now customer can be new or existing
             shop=cart.shop,
             payment_method=cart.payment_method,
             payment_status=payment_status,
@@ -1902,8 +1858,8 @@ class PlaceWalkInCartView(APIView):
             order_type="walkin",
             status="accepted",
             accepted_at=timezone.now(),
-            customer_name=cart.customer_name,
-            customer_phone=cart.customer_phone,
+            customer_name=customer.first_name if customer else cart.customer_name,
+            customer_phone=customer.phone if customer else cart.customer_phone,
             notes=cart.notes,
             total_amount=0,
             original_amount=0,
@@ -1916,8 +1872,8 @@ class PlaceWalkInCartView(APIView):
         engine = OfferEngine(
             customer=customer,
             shop=cart.shop,
-            coupon_code=coupon_code,          # ignored if discount_id is used
-            forced_discount=selected_discount, # force manual discount if provided
+            coupon_code=coupon_code,
+            forced_discount=selected_discount,
         )
 
         original_total = Decimal("0.00")
@@ -1925,30 +1881,24 @@ class PlaceWalkInCartView(APIView):
         final_total = Decimal("0.00")
 
         for item in cart.items.all():
-            # If item has no menu_item → fallback to original cart price
             if item.menu_item is None:
                 item_price = Decimal(item.item_price) * item.quantity
-                # Create a dummy OfferResult without any discount
                 offer = OfferEngine.empty_result(price=item_price)
             else:
-                # Get best offer (or forced discount)
                 offer = engine.get_best_offer(
                     menu_item=item.menu_item,
                     quantity=item.quantity,
                 )
 
-            # Accumulate totals
             original_total += offer.original_price
             discount_total += offer.discount_amount
             final_total += offer.final_price
 
-            # Track promotion type for the order (only if offer has a discount)
             if offer.has_offer and offer.promotion_type == "discount":
                 selected_discount = offer.discount
             elif offer.has_offer and offer.promotion_type == "coupon":
                 selected_coupon = offer.coupon
 
-            # Create OrderItem with full discount details
             OrderItem.objects.create(
                 order=order,
                 menu_item=item.menu_item,
@@ -2042,8 +1992,9 @@ class PlaceWalkInCartView(APIView):
             "success": True,
             "message": "Walk-In Order Created Successfully",
             "order": serializer.data,
-        })  
+        })
         
+                
         
 def update_order_total(order):
 

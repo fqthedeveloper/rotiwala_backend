@@ -1,5 +1,3 @@
-# whatsapp/services.py
-
 import requests
 import json
 import logging
@@ -17,12 +15,6 @@ class WhatsAppService:
     def _send_template(cls, to_phone: str, template_name: str, components: list = None, language: str = "en"):
         if not to_phone.startswith("+"):
             to_phone = "+" + to_phone
-
-        # Debug – shows token preview
-        token_preview = cls.ACCESS_TOKEN[:20] + "..." if cls.ACCESS_TOKEN else "MISSING"
-        print(f"🔑 Token: {token_preview}")
-        print(f"📱 Phone: {to_phone}")
-        print(f"📝 Template: {template_name}")
 
         url = f"{cls.BASE_URL}/{cls.PHONE_NUMBER_ID}/messages"
         headers = {
@@ -42,6 +34,7 @@ class WhatsAppService:
         if components:
             payload["template"]["components"] = components
 
+        # Debug prints (remove in production)
         print("=" * 60)
         print("WHATSAPP REQUEST:")
         print(f"URL: {url}")
@@ -49,13 +42,13 @@ class WhatsAppService:
         print("=" * 60)
 
         try:
-            # Temporary bypass SSL for testing – remove in production
+            # ⚠️ Remove verify=False in production
             resp = requests.post(
                 url,
                 headers=headers,
                 json=payload,
                 timeout=30,
-                verify=False   # ⚠️ Remove this in production!
+                verify=False
             )
             resp.raise_for_status()
             result = resp.json()
@@ -68,52 +61,10 @@ class WhatsAppService:
             )
             print("✅ WhatsApp message sent successfully!")
             return {"success": True, "data": result}
-        except requests.exceptions.SSLError as e:
-            error_msg = f"SSL Error: {str(e)}"
-            print(f"❌ {error_msg}")
-            logger.error(error_msg)
-            WhatsAppMessageLog.objects.create(
-                template_name=template_name,
-                recipient=to_phone,
-                parameters=components,
-                status='failed',
-                error_message=error_msg
-            )
-            raise Exception(f"WhatsApp SSL Error: {error_msg}")
-        except requests.exceptions.ConnectionError as e:
-            error_msg = f"Connection Error: {str(e)}"
-            print(f"❌ {error_msg}")
-            logger.error(error_msg)
-            WhatsAppMessageLog.objects.create(
-                template_name=template_name,
-                recipient=to_phone,
-                parameters=components,
-                status='failed',
-                error_message=error_msg
-            )
-            raise Exception(f"WhatsApp Connection Error: {error_msg}")
-        except requests.exceptions.Timeout as e:
-            error_msg = f"Timeout Error: {str(e)}"
-            print(f"❌ {error_msg}")
-            logger.error(error_msg)
-            WhatsAppMessageLog.objects.create(
-                template_name=template_name,
-                recipient=to_phone,
-                parameters=components,
-                status='failed',
-                error_message=error_msg
-            )
-            raise Exception(f"WhatsApp Timeout Error: {error_msg}")
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             error_msg = str(e)
-            error_body = ""
-            status_code = "No status"
             if hasattr(e, 'response') and e.response is not None:
-                status_code = e.response.status_code
-                error_body = e.response.text
-                error_msg = f"HTTP {status_code} – {error_body}"
-            else:
-                error_msg = f"Request failed: {str(e)}"
+                error_msg = f"HTTP {e.response.status_code} – {e.response.text}"
             print(f"❌ WhatsApp API Error: {error_msg}")
             logger.error(f"WhatsApp send failed: {error_msg}")
             WhatsAppMessageLog.objects.create(
@@ -125,14 +76,9 @@ class WhatsAppService:
             )
             raise Exception(f"WhatsApp API Error: {error_msg}")
 
-    # ---------- Public template methods ----------
-
+    # ---------- Public methods ----------
     @classmethod
     def send_otp(cls, phone: str, otp_code: str):
-        """
-        Send OTP – only the 6‑digit code, both in body and button parameter.
-        The button parameter must be ≤ 15 characters.
-        """
         components = [
             {
                 "type": "body",
@@ -142,9 +88,7 @@ class WhatsAppService:
                 "type": "button",
                 "sub_type": "url",
                 "index": 0,
-                "parameters": [
-                    {"type": "text", "text": otp_code}   # ✅ only the raw code
-                ]
+                "parameters": [{"type": "text", "text": otp_code}]
             }
         ]
         return cls._send_template(phone, "otp_verification", components)
@@ -182,18 +126,18 @@ class WhatsAppService:
 
     @classmethod
     def send_order_rejected(cls, customer_phone: str, order_id: str, reason: str = None):
-        components = [{
-            "type": "body",
-            "parameters": [{"type": "text", "text": order_id}]
-        }]
+        params = [{"type": "text", "text": order_id}]
+        if reason:
+            params.append({"type": "text", "text": reason})
+        components = [{"type": "body", "parameters": params}]
         return cls._send_template(customer_phone, "order_rejected", components)
 
     @classmethod
     def send_order_ready(cls, customer_phone: str, order_id: str, pickup_time: str = None):
-        components = [{
-            "type": "body",
-            "parameters": [{"type": "text", "text": order_id}]
-        }]
+        params = [{"type": "text", "text": order_id}]
+        if pickup_time:
+            params.append({"type": "text", "text": pickup_time})
+        components = [{"type": "body", "parameters": params}]
         return cls._send_template(customer_phone, "order_ready", components)
 
     @classmethod
@@ -235,4 +179,4 @@ class WhatsAppService:
                 {"type": "text", "text": customer_name}
             ]
         }]
-        return cls._send_template(manager_phone, "manager_order_canc", components)
+        return cls._send_template(manager_phone, "manager_order_cancelled", components)
