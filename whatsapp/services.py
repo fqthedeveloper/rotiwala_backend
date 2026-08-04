@@ -34,7 +34,7 @@ class WhatsAppService:
         if components:
             payload["template"]["components"] = components
 
-        # Debug prints (remove in production)
+        # Debug (remove in production)
         print("=" * 60)
         print("WHATSAPP REQUEST:")
         print(f"URL: {url}")
@@ -76,9 +76,11 @@ class WhatsAppService:
             )
             raise Exception(f"WhatsApp API Error: {error_msg}")
 
-    # ---------- Public methods ----------
+    # ---------- Public template methods ----------
+
     @classmethod
     def send_otp(cls, phone: str, otp_code: str):
+        """Template: otp_verification – assumes 1 body parameter + button parameter"""
         components = [
             {
                 "type": "body",
@@ -95,6 +97,7 @@ class WhatsAppService:
 
     @classmethod
     def send_welcome(cls, phone: str, customer_name: str):
+        """Template: welcome_customer – assumes 1 body parameter"""
         components = [{
             "type": "body",
             "parameters": [{"type": "text", "text": customer_name}]
@@ -102,19 +105,62 @@ class WhatsAppService:
         return cls._send_template(phone, "welcome_customer", components)
 
     @classmethod
-    def send_manager_new_order(cls, manager_phone: str, order_id: str, customer_name: str, total: str):
+    def send_manager_new_order(cls, manager_phone: str, order_id: str, customer_name: str, total: str, pickup_time: str):
+        """
+        Template: manager_new_order
+        Placeholders: {{1}} Order Number, {{2}} Customer Name, {{3}} Total Amount, {{4}} Pickup Time
+        """
         components = [{
             "type": "body",
             "parameters": [
                 {"type": "text", "text": order_id},
                 {"type": "text", "text": customer_name},
-                {"type": "text", "text": total}
+                {"type": "text", "text": total},
+                {"type": "text", "text": pickup_time}
             ]
         }]
         return cls._send_template(manager_phone, "manager_new_order", components)
 
     @classmethod
-    def send_order_accepted(cls, customer_phone: str, order_id: str, shop_name: str):
+    def send_order_accepted(cls, customer_phone: str, customer_name: str, order_id: str, prep_time_minutes: str):
+        """
+        Template: order_accepted_v1
+        Placeholders: {{1}} Customer Name, {{2}} Order Number, {{3}} Estimated Prep Time (minutes)
+        """
+        components = [{
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": customer_name},
+                {"type": "text", "text": order_id},
+                {"type": "text", "text": prep_time_minutes}
+            ]
+        }]
+        return cls._send_template(customer_phone, "order_accepted_v1", components)
+
+    @classmethod
+    def send_order_rejected(cls, customer_phone: str, order_id: str, reason: str):
+        """
+        Template: order_rejected
+        Placeholders: {{1}} Order Number, {{2}} Reason
+        """
+        # Provide a default reason if none given
+        if not reason:
+            reason = "not specified"
+        components = [{
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": order_id},
+                {"type": "text", "text": reason}
+            ]
+        }]
+        return cls._send_template(customer_phone, "order_rejected", components)
+
+    @classmethod
+    def send_order_ready(cls, customer_phone: str, order_id: str, shop_name: str):
+        """
+        Template: order_ready
+        Placeholders: {{1}} Order Number, {{2}} Shop Name
+        """
         components = [{
             "type": "body",
             "parameters": [
@@ -122,26 +168,14 @@ class WhatsAppService:
                 {"type": "text", "text": shop_name}
             ]
         }]
-        return cls._send_template(customer_phone, "order_accepted_v1", components)
-
-    @classmethod
-    def send_order_rejected(cls, customer_phone: str, order_id: str, reason: str = None):
-        params = [{"type": "text", "text": order_id}]
-        if reason:
-            params.append({"type": "text", "text": reason})
-        components = [{"type": "body", "parameters": params}]
-        return cls._send_template(customer_phone, "order_rejected", components)
-
-    @classmethod
-    def send_order_ready(cls, customer_phone: str, order_id: str, pickup_time: str = None):
-        params = [{"type": "text", "text": order_id}]
-        if pickup_time:
-            params.append({"type": "text", "text": pickup_time})
-        components = [{"type": "body", "parameters": params}]
         return cls._send_template(customer_phone, "order_ready", components)
 
     @classmethod
     def send_pickup_reminder(cls, phone: str, order_id: str, time: str):
+        """
+        Template: pickup_reminder
+        Placeholders: {{1}} Order Number, {{2}} Pickup Time
+        """
         components = [{
             "type": "body",
             "parameters": [
@@ -153,6 +187,9 @@ class WhatsAppService:
 
     @classmethod
     def send_discount_offer(cls, phone: str, code: str, discount: str):
+        """
+        Template: discount_offer – adjust placeholders if needed
+        """
         components = [{
             "type": "body",
             "parameters": [
@@ -164,6 +201,9 @@ class WhatsAppService:
 
     @classmethod
     def send_coupon_offer(cls, phone: str, coupon: str):
+        """
+        Template: coupon_offer – adjust placeholders if needed
+        """
         components = [{
             "type": "body",
             "parameters": [{"type": "text", "text": coupon}]
@@ -172,6 +212,10 @@ class WhatsAppService:
 
     @classmethod
     def send_manager_order_cancelled(cls, manager_phone: str, order_id: str, customer_name: str):
+        """
+        Template: manager_order_cancelled (or manager_order_canc)
+        Placeholders: {{1}} Order Number, {{2}} Customer Name
+        """
         components = [{
             "type": "body",
             "parameters": [

@@ -367,12 +367,19 @@ class PlaceOrderView(APIView):
 
         # ✅ WhatsApp notification to manager
         if manager and manager.phone:
+            # Prepare pickup time display
+            if order.pickup_type == "scheduled" and order.pickup_time:
+                pickup_display = order.pickup_time.strftime("%d %b %I:%M %p")
+            else:
+                pickup_display = order.estimated_ready_time.strftime("%d %b %I:%M %p") if order.estimated_ready_time else "ASAP"
+
             try:
                 WhatsAppService.send_manager_new_order(
                     manager_phone=manager.phone,
                     order_id=order.order_number,
                     customer_name=order.customer_name,
-                    total=str(order.total_amount)
+                    total=str(order.total_amount),
+                    pickup_time=pickup_display
                 )
             except Exception as e:
                 logger.warning(f"Manager WhatsApp notification failed: {e}")
@@ -464,26 +471,25 @@ class AcceptOrderView(APIView):
         order.save()
         send_order_update(order)
 
-        # Push notification to customer
+        # Push notification (optional)
         if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
                 title="Order Accepted",
                 body=f"Order #{order.order_number} accepted",
-                data={
-                    "type": "order",
-                    "status": "accepted",
-                    "order_id": str(order.id)
-                }
+                data={"type": "order", "status": "accepted", "order_id": str(order.id)}
             )
 
-        # ✅ WhatsApp notification to customer
+        # WhatsApp notification to customer
         if order.customer and order.customer.phone:
+            customer_name = order.customer.get_full_name() or order.customer.username or "Customer"
+            prep_time = str(order.estimated_minutes)  # e.g., "20"
             try:
                 WhatsAppService.send_order_accepted(
                     customer_phone=order.customer.phone,
+                    customer_name=customer_name,
                     order_id=order.order_number,
-                    shop_name=order.shop.name
+                    prep_time_minutes=prep_time
                 )
             except Exception as e:
                 logger.warning(f"Order accepted WhatsApp failed: {e}")
@@ -507,7 +513,7 @@ class RejectOrderView(APIView):
         order.save()
         send_order_update(order)
 
-        # Update customer profile (trust score)
+        # Update customer profile (if exists)
         if order.customer:
             profile = CustomerProfile.objects.get(user=order.customer)
             profile.total_rejected_orders += 1
@@ -516,20 +522,16 @@ class RejectOrderView(APIView):
                 profile.is_flagged = True
             profile.save()
 
-        # Push notification to customer
+        # Push notification
         if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
                 title="Order Rejected",
                 body=reason,
-                data={
-                    "type": "order",
-                    "status": "rejected",
-                    "order_id": str(order.id)
-                }
+                data={"type": "order", "status": "rejected", "order_id": str(order.id)}
             )
 
-        # ✅ WhatsApp notification to customer
+        # WhatsApp notification to customer
         if order.customer and order.customer.phone:
             try:
                 WhatsAppService.send_order_rejected(
@@ -576,27 +578,22 @@ class ReadyOrderView(APIView):
         order.save()
         send_order_update(order)
 
-        # Push notification to customer
+        # Push notification
         if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
                 title="Order Ready",
                 body="Your order is ready for pickup",
-                data={
-                    "type": "order",
-                    "status": "ready",
-                    "order_id": str(order.id)
-                }
+                data={"type": "order", "status": "ready", "order_id": str(order.id)}
             )
 
-        # ✅ WhatsApp notification to customer
+        # WhatsApp notification to customer
         if order.customer and order.customer.phone:
-            pickup_time = order.estimated_ready_time.strftime("%I:%M %p") if order.estimated_ready_time else "soon"
             try:
                 WhatsAppService.send_order_ready(
                     customer_phone=order.customer.phone,
                     order_id=order.order_number,
-                    pickup_time=pickup_time
+                    shop_name=order.shop.name
                 )
             except Exception as e:
                 logger.warning(f"Order ready WhatsApp failed: {e}")
@@ -658,7 +655,6 @@ class CancelOrderView(APIView):
 
     def post(self, request, pk):
         order = Order.objects.get(id=pk, customer=request.user)
-
         if order.status not in ["pending", "accepted"]:
             return Response({"error": "Cannot cancel"}, status=400)
 
@@ -674,11 +670,8 @@ class CancelOrderView(APIView):
             profile.is_flagged = True
         profile.save()
 
-        # ✅ Notify manager via WhatsApp (if cancelled by customer)
-        manager = User.objects.filter(
-            role="manager",
-            manager_profile__shop=order.shop
-        ).first()
+        # Notify manager via WhatsApp (if order was placed by customer)
+        manager = User.objects.filter(role="manager", manager_profile__shop=order.shop).first()
         if manager and manager.phone:
             try:
                 WhatsAppService.send_manager_order_cancelled(
@@ -690,7 +683,6 @@ class CancelOrderView(APIView):
                 logger.warning(f"Manager cancellation WhatsApp failed: {e}")
 
         return Response({"message": "Order Cancelled"})
-
 
 
 class PaymentReceivedView(APIView):
