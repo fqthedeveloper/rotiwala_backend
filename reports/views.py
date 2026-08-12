@@ -1,3 +1,4 @@
+# reports/views.py
 import io
 from datetime import datetime, timedelta
 from calendar import monthrange
@@ -7,7 +8,7 @@ from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from .renderers import AnyRenderer
+from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 
 from openpyxl import Workbook
@@ -19,13 +20,48 @@ from reportlab.lib.units import inch
 
 from shops.models import Shop
 from orders.models import Order
-from expenses.models import ExpenseEntry, MaintenanceExpense
+from expenses.models import ExpenseEntry, MaintenanceExpense, StaffSalaryRecord
 from accounts.models import User, CustomerProfile
 from accounts.models import ManagerProfile
 
 
 # ---------------------------------------------------------------------
-# Existing dashboard and legacy report views (unchanged)
+# Custom renderer to bypass DRF content negotiation for file downloads
+# ---------------------------------------------------------------------
+class AnyRenderer(BaseRenderer):
+    media_type = '*/*'
+    format = 'bin'
+
+    def render(self, data, media_type=None, renderer_context=None):
+        # data is already the HttpResponse content; just return it
+        return data
+
+
+# ---------------------------------------------------------------------
+# Helper: resolve manager shop
+# ---------------------------------------------------------------------
+def _get_manager_shop(user, query_shop_id=None):
+    """Resolve manager's shop with multiple fallbacks."""
+    shop = None
+    if hasattr(user, 'manager_profile') and user.manager_profile:
+        shop = user.manager_profile.shop
+    if not shop and hasattr(user, 'shop') and user.shop:
+        shop = user.shop
+    if not shop and hasattr(user, 'shop_id') and user.shop_id:
+        try:
+            shop = Shop.objects.get(id=user.shop_id)
+        except Shop.DoesNotExist:
+            pass
+    if not shop and query_shop_id:
+        try:
+            shop = Shop.objects.get(id=query_shop_id)
+        except Shop.DoesNotExist:
+            pass
+    return shop
+
+
+# ---------------------------------------------------------------------
+# Legacy dashboard views (unchanged but with corrected field names)
 # ---------------------------------------------------------------------
 
 class ManagerDashboardView(APIView):
@@ -132,12 +168,13 @@ class SalesReportView(APIView):
         return Response({"start": start, "end": end, "orders": orders.count(), "sales": total_sales})
 
 
+# Fixed: ExpenseReportView uses entry_datetime
 class ExpenseReportView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
         start = request.GET.get("start")
         end = request.GET.get("end")
-        expenses = ExpenseEntry.objects.filter(expense_date__range=[start, end])
+        expenses = ExpenseEntry.objects.filter(entry_datetime__date__range=[start, end])
         total_expense = expenses.aggregate(total=Sum("total_amount"))["total"] or 0
         return Response({"start": start, "end": end, "expenses": total_expense, "records": expenses.count()})
 
@@ -158,7 +195,7 @@ class ProfitLossReportView(APIView):
         start = request.GET.get("start")
         end = request.GET.get("end")
         sales = Order.objects.filter(status="collected", ordered_at__date__range=[start, end]).aggregate(total=Sum("total_amount"))["total"] or 0
-        expenses = ExpenseEntry.objects.filter(expense_date__range=[start, end]).aggregate(total=Sum("total_amount"))["total"] or 0
+        expenses = ExpenseEntry.objects.filter(entry_datetime__date__range=[start, end]).aggregate(total=Sum("total_amount"))["total"] or 0
         maintenance = MaintenanceExpense.objects.filter(maintenance_date__range=[start, end]).aggregate(total=Sum("amount"))["total"] or 0
         total_expense = expenses + maintenance
         return Response({
@@ -185,6 +222,10 @@ class ShopExpenseReportView(APIView):
         total = expenses.aggregate(total=Sum("total_amount"))["total"] or 0
         return Response({"shop_id": shop_id, "records": expenses.count(), "expense": total})
 
+
+# ---------------------------------------------------------------------
+# Export Views (Fixed: use entry_datetime, include staff salary)
+# ---------------------------------------------------------------------
 
 class ExportSalesExcelView(APIView):
     permission_classes = [IsAuthenticated]
@@ -220,7 +261,7 @@ class ExportExpenseExcelView(APIView):
                 expense.shop.name,
                 expense.category.name,
                 float(expense.total_amount),
-                str(expense.expense_date),
+                str(expense.entry_datetime.date()),
             ])
         response = HttpResponse(content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         response["Content-Disposition"] = 'attachment; filename="expense_report.xlsx"'
@@ -295,60 +336,12 @@ class KPIDashboardView(APIView):
         })
 
 
-
-def _get_manager_shop(self, user, query_shop_id=None):
-    """
-    Resolve manager shop.
-    """
-
-    try:
-        if user.manager_profile.shop:
-            return user.manager_profile.shop
-    except Exception:
-        pass
-
-    if query_shop_id:
-        try:
-            return Shop.objects.get(pk=query_shop_id)
-        except Shop.DoesNotExist:
-            pass
-
-    return None
-
 # ---------------------------------------------------------------------
-# NEW UNIFIED REPORT AND EXPORT VIEWS (FIXED)
+# NEW UNIFIED REPORT AND EXPORT VIEWS (FIXED with renderer)
 # ---------------------------------------------------------------------
 
 class ReportView(APIView):
     permission_classes = [IsAuthenticated]
-
-    def _get_manager_shop(self, user, query_shop_id=None):
-        """Resolve manager's shop with multiple fallbacks."""
-        shop = None
-
-        # 1. Try managerprofile
-        if hasattr(user, 'manager_profile') and user.manager_profile:
-            shop = user.manager_profile.shop
-
-        # 2. Try direct shop FK
-        if not shop and hasattr(user, 'shop') and user.shop:
-            shop = user.shop
-
-        # 3. Try shop_id attribute (integer)
-        if not shop and hasattr(user, 'shop_id') and user.shop_id:
-            try:
-                shop = Shop.objects.get(id=user.shop_id)
-            except Shop.DoesNotExist:
-                shop = None
-
-        # 4. Final fallback: use query parameter (if provided)
-        if not shop and query_shop_id:
-            try:
-                shop = Shop.objects.get(id=query_shop_id)
-            except Shop.DoesNotExist:
-                shop = None
-
-        return shop
 
     def get(self, request):
         if not request.user.is_authenticated:
@@ -360,7 +353,7 @@ class ReportView(APIView):
         end_date = request.query_params.get('end')
         shop_id = request.query_params.get('shop')
 
-        # ---------- DATE RANGE ----------
+        # Date range
         today = timezone.now().date()
         if filter_type == 'today':
             start_date = end_date = today
@@ -376,19 +369,18 @@ class ReportView(APIView):
         else:
             start_date = end_date = today
 
-        # ---------- SHOP RESOLUTION ----------
+        # Shop filter
         shop_filter = Q()
         if user.role == 'manager':
-            shop = self._get_manager_shop(user, shop_id)
+            shop = _get_manager_shop(user, shop_id)
             if not shop:
                 return Response({"error": "Manager has no shop."}, status=400)
             shop_filter = Q(shop=shop)
         else:
-            # Super_admin or other roles: use query param if provided
             if shop_id:
                 shop_filter = Q(shop_id=shop_id)
 
-        # ---------- DATA FETCHING ----------
+        # Data
         sales_qs = Order.objects.filter(
             status='collected',
             ordered_at__date__gte=start_date,
@@ -398,8 +390,8 @@ class ReportView(APIView):
         order_count = sales_qs.count()
 
         expense_qs = ExpenseEntry.objects.filter(
-            expense_date__gte=start_date,
-            expense_date__lte=end_date
+            entry_datetime__date__gte=start_date,
+            entry_datetime__date__lte=end_date
         ).filter(shop_filter)
         total_expenses = expense_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
@@ -409,10 +401,16 @@ class ReportView(APIView):
         ).filter(shop_filter)
         total_maintenance = maint_qs.aggregate(total=Sum('amount'))['total'] or 0
 
-        total_outgoing = total_expenses + total_maintenance
+        staff_salary_qs = StaffSalaryRecord.objects.filter(
+            payment_date__gte=start_date,
+            payment_date__lte=end_date
+        ).filter(shop_filter)
+        total_staff_salary = staff_salary_qs.aggregate(total=Sum('amount'))['total'] or 0
+
+        total_outgoing = total_expenses + total_maintenance + total_staff_salary
         profit = total_sales - total_outgoing
 
-        # Shop breakdown (only for super_admin)
+        # Shop breakdown (for super_admin)
         shops_data = None
         if user.role == 'super_admin':
             shops = Shop.objects.all()
@@ -427,13 +425,18 @@ class ReportView(APIView):
                     shop=s
                 ).aggregate(total=Sum('total_amount'))['total'] or 0
                 s_exp = ExpenseEntry.objects.filter(
-                    expense_date__gte=start_date,
-                    expense_date__lte=end_date,
+                    entry_datetime__date__gte=start_date,
+                    entry_datetime__date__lte=end_date,
                     shop=s
                 ).aggregate(total=Sum('total_amount'))['total'] or 0
                 s_maint = MaintenanceExpense.objects.filter(
                     maintenance_date__gte=start_date,
                     maintenance_date__lte=end_date,
+                    shop=s
+                ).aggregate(total=Sum('amount'))['total'] or 0
+                s_salary = StaffSalaryRecord.objects.filter(
+                    payment_date__gte=start_date,
+                    payment_date__lte=end_date,
                     shop=s
                 ).aggregate(total=Sum('amount'))['total'] or 0
                 shops_data.append({
@@ -442,7 +445,8 @@ class ReportView(APIView):
                     'sales': s_sales,
                     'expenses': s_exp,
                     'maintenance': s_maint,
-                    'profit': s_sales - (s_exp + s_maint)
+                    'staff_salary': s_salary,
+                    'profit': s_sales - (s_exp + s_maint + s_salary)
                 })
 
         return Response({
@@ -456,47 +460,27 @@ class ReportView(APIView):
                 'orders': order_count,
                 'expenses': total_expenses,
                 'maintenance': total_maintenance,
+                'staff_salary': total_staff_salary,
                 'total_outgoing': total_outgoing,
                 'profit': profit,
             },
             'shops': shops_data,
         })
 
+
 class ExportReportView(APIView):
     permission_classes = [IsAuthenticated]
-    renderer_classes = (AnyRenderer,)
-
-    def _get_manager_shop(self, user, query_shop_id=None):
-        """Resolve manager's shop with fallbacks."""
-        shop = None
-        if hasattr(user, 'manager_profile') and user.manager_profile:
-            shop = user.manager_profile.shop
-        if not shop and hasattr(user, 'shop') and user.shop:
-            shop = user.shop
-        if not shop and hasattr(user, 'shop_id') and user.shop_id:
-            try:
-                shop = Shop.objects.get(id=user.shop_id)
-            except Shop.DoesNotExist:
-                pass
-        if not shop and query_shop_id:
-            try:
-                shop = Shop.objects.get(id=query_shop_id)
-            except Shop.DoesNotExist:
-                pass
-        return shop
+    renderer_classes = (AnyRenderer,)  # <-- FIX: Bypass content negotiation
 
     def get(self, request):
         # Parse parameters
-        # Accept either explicit `format` (legacy) or renamed `file` param
-        format_type = (
-            (request.query_params.get('format') or request.query_params.get('file') or 'excel')
-        ).lower()
+        format_type = (request.query_params.get('format') or request.query_params.get('file') or 'excel').lower()
         filter_type = request.query_params.get('filter', 'today')
         start_date = request.query_params.get('start')
         end_date = request.query_params.get('end')
         shop_id = request.query_params.get('shop')
 
-        # Build date range
+        # Date range
         today = timezone.now().date()
         if filter_type == 'today':
             start_date = end_date = today
@@ -512,14 +496,14 @@ class ExportReportView(APIView):
         else:
             start_date = end_date = today
 
-        # Shop filtering
+        # Shop filter
         user = request.user
         shop_filter = Q()
         if user.role == 'manager':
-            shop = self._get_manager_shop(user, shop_id)
+            shop = _get_manager_shop(user, shop_id)
             if not shop:
                 return HttpResponse(
-                    {"error": "Manager has no shop."},
+                    '{"error": "Manager has no shop."}',
                     status=400,
                     content_type='application/json'
                 )
@@ -528,7 +512,7 @@ class ExportReportView(APIView):
             if shop_id:
                 shop_filter = Q(shop_id=shop_id)
 
-        # Fetch data
+        # Data
         sales_qs = Order.objects.filter(
             status='collected',
             ordered_at__date__gte=start_date,
@@ -538,8 +522,8 @@ class ExportReportView(APIView):
         order_count = sales_qs.count()
 
         expense_qs = ExpenseEntry.objects.filter(
-            expense_date__gte=start_date,
-            expense_date__lte=end_date
+            entry_datetime__date__gte=start_date,
+            entry_datetime__date__lte=end_date
         ).filter(shop_filter)
         total_expenses = expense_qs.aggregate(total=Sum('total_amount'))['total'] or 0
 
@@ -549,31 +533,38 @@ class ExportReportView(APIView):
         ).filter(shop_filter)
         total_maintenance = maint_qs.aggregate(total=Sum('amount'))['total'] or 0
 
-        profit = total_sales - (total_expenses + total_maintenance)
+        staff_salary_qs = StaffSalaryRecord.objects.filter(
+            payment_date__gte=start_date,
+            payment_date__lte=end_date
+        ).filter(shop_filter)
+        total_staff_salary = staff_salary_qs.aggregate(total=Sum('amount'))['total'] or 0
+
+        total_outgoing = total_expenses + total_maintenance + total_staff_salary
+        profit = total_sales - total_outgoing
 
         # Generate file
         if format_type == 'excel':
             return self._generate_excel(
-                start_date, end_date, sales_qs, expense_qs, maint_qs,
-                total_sales, order_count, total_expenses, total_maintenance, profit
+                start_date, end_date, sales_qs, expense_qs, maint_qs, staff_salary_qs,
+                total_sales, order_count, total_expenses, total_maintenance, total_staff_salary, profit
             )
         elif format_type == 'pdf':
             return self._generate_pdf(
-                start_date, end_date, sales_qs, expense_qs, maint_qs,
-                total_sales, order_count, total_expenses, total_maintenance, profit
+                start_date, end_date, sales_qs, expense_qs, maint_qs, staff_salary_qs,
+                total_sales, order_count, total_expenses, total_maintenance, total_staff_salary, profit
             )
         else:
             return HttpResponse(
-                {"error": "Unsupported format. Use 'excel' or 'pdf'."},
+                '{"error": "Unsupported format. Use \'excel\' or \'pdf\'."}',
                 status=400,
                 content_type='application/json'
             )
 
     # ------------------------------------------------------------------
-    # Excel Generator
+    # Excel Generator (Deep Information)
     # ------------------------------------------------------------------
-    def _generate_excel(self, start_date, end_date, sales_qs, expense_qs, maint_qs,
-                        total_sales, order_count, total_expenses, total_maintenance, profit):
+    def _generate_excel(self, start_date, end_date, sales_qs, expense_qs, maint_qs, staff_salary_qs,
+                        total_sales, order_count, total_expenses, total_maintenance, total_staff_salary, profit):
         wb = Workbook()
 
         # Sheet 1: Summary
@@ -581,13 +572,14 @@ class ExportReportView(APIView):
         ws_summary.title = "Summary"
         ws_summary.append(["Report Period", f"{start_date} to {end_date}"])
         ws_summary.append([])
-        ws_summary.append(["Metric", "Value"])
-        ws_summary.append(["Total Sales (₹)", total_sales])
+        ws_summary.append(["Metric", "Value (₹)"])
+        ws_summary.append(["Total Sales", total_sales])
         ws_summary.append(["Orders", order_count])
-        ws_summary.append(["Expenses (₹)", total_expenses])
-        ws_summary.append(["Maintenance (₹)", total_maintenance])
-        ws_summary.append(["Total Outgoing (₹)", total_expenses + total_maintenance])
-        ws_summary.append(["Profit (₹)", profit])
+        ws_summary.append(["Expenses", total_expenses])
+        ws_summary.append(["Maintenance", total_maintenance])
+        ws_summary.append(["Staff Salary", total_staff_salary])
+        ws_summary.append(["Total Outgoing", total_expenses + total_maintenance + total_staff_salary])
+        ws_summary.append(["Profit", profit])
 
         # Sheet 2: Orders
         ws_orders = wb.create_sheet("Orders")
@@ -602,43 +594,28 @@ class ExportReportView(APIView):
                 order.ordered_at.strftime("%Y-%m-%d %H:%M")
             ])
 
-        # Sheet 3: Expenses
+        # Sheet 3: Expenses (Header)
         ws_expenses = wb.create_sheet("Expenses")
         ws_expenses.append([
-            "Expense ID",
-            "Shop",
-            "Category",
-            "Created By",
-            "Expense Date",
-            "Created At",
-            "Amount (₹)",
-            "Notes",
+            "Expense ID", "Shop", "Category", "Created By", "Expense Date", "Total Amount (₹)", "Notes"
         ])
         for exp in expense_qs.select_related('shop', 'category', 'created_by'):
-            note_val = getattr(exp, 'note', None) or getattr(exp, 'notes', None) or ""
-            created_by = exp.created_by.username if getattr(exp, 'created_by', None) else "-"
+            created_by = exp.created_by.username if exp.created_by else "-"
             ws_expenses.append([
                 exp.id,
                 exp.shop.name,
                 exp.category.name,
                 created_by,
-                exp.expense_date.strftime("%Y-%m-%d"),
-                exp.created_at.strftime("%Y-%m-%d %H:%M:%S") if exp.created_at else "",
+                exp.entry_datetime.strftime("%Y-%m-%d"),
                 float(exp.total_amount),
-                note_val,
+                exp.notes or ""
             ])
 
         # Sheet 4: Expense Items (detailed breakdown)
         ws_exp_items = wb.create_sheet("Expense Items")
         ws_exp_items.append([
-            "Expense ID",
-            "Item Name",
-            "Quantity",
-            "Amount (₹)",
-            "Note",
-            "Created At",
+            "Expense ID", "Item Name", "Quantity", "Amount (₹)", "Note", "Created At"
         ])
-        # Prefetch related items for efficiency
         for exp in expense_qs.prefetch_related('expense_items').only('id'):
             for item in exp.expense_items.all():
                 ws_exp_items.append([
@@ -650,15 +627,40 @@ class ExportReportView(APIView):
                     item.created_at.strftime("%Y-%m-%d %H:%M:%S") if item.created_at else "",
                 ])
 
-        # Sheet 4: Maintenance
+        # Sheet 5: Maintenance
         ws_maint = wb.create_sheet("Maintenance")
-        ws_maint.append(["Shop", "Description", "Amount (₹)", "Date"])
-        for m in maint_qs.select_related('shop'):
+        ws_maint.append(["ID", "Shop", "Title", "Description", "Amount (₹)", "Date", "Created By"])
+        for m in maint_qs.select_related('shop', 'created_by'):
+            created_by = m.created_by.username if m.created_by else "-"
             ws_maint.append([
+                m.id,
                 m.shop.name,
+                m.title,
                 m.description or "",
                 float(m.amount),
-                m.maintenance_date.strftime("%Y-%m-%d")
+                m.maintenance_date.strftime("%Y-%m-%d"),
+                created_by
+            ])
+
+        # Sheet 6: Staff Salary Records
+        ws_salary = wb.create_sheet("Staff Salary")
+        ws_salary.append([
+            "Record ID", "Staff Name", "Shop", "Amount (₹)", "Payment Date",
+            "Payment Method", "UTR Number", "Payment Type", "Notes", "Created By"
+        ])
+        for rec in staff_salary_qs.select_related('staff', 'shop', 'created_by'):
+            created_by = rec.created_by.username if rec.created_by else "-"
+            ws_salary.append([
+                rec.id,
+                rec.staff.name,
+                rec.shop.name,
+                float(rec.amount),
+                rec.payment_date.strftime("%Y-%m-%d"),
+                rec.get_payment_method_display(),
+                rec.utr_number or "",
+                rec.get_payment_type_display(),
+                rec.notes or "",
+                created_by
             ])
 
         # Build response
@@ -670,10 +672,10 @@ class ExportReportView(APIView):
         return response
 
     # ------------------------------------------------------------------
-    # PDF Generator
+    # PDF Generator (Brief)
     # ------------------------------------------------------------------
-    def _generate_pdf(self, start_date, end_date, sales_qs, expense_qs, maint_qs,
-                      total_sales, order_count, total_expenses, total_maintenance, profit):
+    def _generate_pdf(self, start_date, end_date, sales_qs, expense_qs, maint_qs, staff_salary_qs,
+                      total_sales, order_count, total_expenses, total_maintenance, total_staff_salary, profit):
         response = HttpResponse(content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="report_{start_date}_to_{end_date}.pdf"'
 
@@ -693,7 +695,8 @@ class ExportReportView(APIView):
             ['Orders', str(order_count)],
             ['Expenses', f"{total_expenses:,.2f}"],
             ['Maintenance', f"{total_maintenance:,.2f}"],
-            ['Total Outgoing', f"{total_expenses + total_maintenance:,.2f}"],
+            ['Staff Salary', f"{total_staff_salary:,.2f}"],
+            ['Total Outgoing', f"{total_expenses + total_maintenance + total_staff_salary:,.2f}"],
             ['Profit', f"{profit:,.2f}"],
         ]
         table = Table(summary_data, colWidths=[2.5 * inch, 2.5 * inch])
@@ -710,8 +713,8 @@ class ExportReportView(APIView):
         elements.append(table)
         elements.append(Spacer(1, 0.3 * inch))
 
-        # Order details (limit to 50 to keep PDF size manageable)
-        elements.append(Paragraph("Order Details", styles['Heading2']))
+        # Order details (limit to 50)
+        elements.append(Paragraph("Order Details (up to 50)", styles['Heading2']))
         order_data = [['Order #', 'Customer', 'Shop', 'Amount (₹)', 'Date']]
         for order in sales_qs.select_related('customer', 'shop')[:50]:
             order_data.append([
@@ -733,74 +736,81 @@ class ExportReportView(APIView):
             ]))
             elements.append(table2)
         else:
-            elements.append(Paragraph("No orders found for the selected period.", styles['Normal']))
+            elements.append(Paragraph("No orders found.", styles['Normal']))
 
-        # Expenses details
+        # Expenses summary (brief)
         elements.append(Spacer(1, 0.2 * inch))
-        elements.append(Paragraph("Expense Details", styles['Heading2']))
-        exp_data = [['Expense ID', 'Shop', 'Category', 'Created By', 'Expense Date', 'Created At', 'Amount (₹)', 'Notes']]
-        for exp in expense_qs.select_related('shop', 'category', 'created_by'):
-            created_by = exp.created_by.username if getattr(exp, 'created_by', None) else '-'
-            note_val = getattr(exp, 'note', None) or getattr(exp, 'notes', None) or ''
-            exp_data.append([
-                str(exp.id),
-                exp.shop.name,
-                exp.category.name,
-                created_by,
-                exp.expense_date.strftime("%Y-%m-%d"),
-                exp.created_at.strftime("%Y-%m-%d %H:%M:%S") if exp.created_at else '',
-                f"{exp.total_amount:,.2f}",
-                note_val,
-            ])
-
-        if len(exp_data) > 1:
-            exp_table = Table(exp_data, colWidths=[0.7*inch, 1.0*inch, 1.0*inch, 1.0*inch, 0.9*inch, 1.3*inch, 1.0*inch, 1.5*inch])
-            exp_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        elements.append(Paragraph("Expenses Summary", styles['Heading2']))
+        exp_summary = [['Category', 'Total (₹)']]
+        exp_by_cat = expense_qs.values('category__name').annotate(total=Sum('total_amount')).order_by('-total')
+        for item in exp_by_cat[:20]:
+            exp_summary.append([item['category__name'], f"{item['total']:,.2f}"])
+        if len(exp_summary) > 1:
+            table3 = Table(exp_summary, colWidths=[2.5*inch, 2.5*inch])
+            table3.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ]))
-            elements.append(exp_table)
+            elements.append(table3)
         else:
-            elements.append(Paragraph("No expenses found for the selected period.", styles['Normal']))
+            elements.append(Paragraph("No expenses found.", styles['Normal']))
 
-        # Expense items (limit to 200 rows to keep PDF reasonable)
+        # Staff salary summary
         elements.append(Spacer(1, 0.2 * inch))
-        elements.append(Paragraph("Expense Items", styles['Heading2']))
-        item_rows = [['Expense ID', 'Item', 'Qty', 'Amount (₹)', 'Note', 'Created At']]
-        count = 0
-        for exp in expense_qs.prefetch_related('expense_items'):
-            for item in exp.expense_items.all():
-                if count >= 200:
-                    break
-                item_rows.append([
-                    str(exp.id),
-                    item.item_name,
-                    str(item.quantity) if item.quantity is not None else '',
-                    f"{item.amount:,.2f}",
-                    item.note or '',
-                    item.created_at.strftime("%Y-%m-%d %H:%M:%S") if item.created_at else '',
-                ])
-                count += 1
-            if count >= 200:
-                break
-
-        if len(item_rows) > 1:
-            item_table = Table(item_rows, colWidths=[0.7*inch, 2.0*inch, 0.6*inch, 1.0*inch, 2.0*inch, 1.3*inch])
-            item_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        elements.append(Paragraph("Staff Salary Summary", styles['Heading2']))
+        salary_summary = [['Staff Name', 'Total Paid (₹)']]
+        salary_by_staff = staff_salary_qs.values('staff__name').annotate(total=Sum('amount')).order_by('-total')
+        for item in salary_by_staff[:20]:
+            salary_summary.append([item['staff__name'], f"{item['total']:,.2f}"])
+        if len(salary_summary) > 1:
+            table4 = Table(salary_summary, colWidths=[2.5*inch, 2.5*inch])
+            table4.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ]))
-            elements.append(item_table)
+            elements.append(table4)
         else:
-            elements.append(Paragraph("No expense items found for the selected period.", styles['Normal']))
+            elements.append(Paragraph("No salary records found.", styles['Normal']))
 
-        # Build PDF
         doc.build(elements)
         return response
-    
-    
+
+
 class TestView(APIView):
     def get(self, request):
         return Response({"message": "Test view works!"})
+
+
+# reports/views.py
+from django.db.models import Count
+from django.utils import timezone
+from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+
+from shops.models import Shop
+from orders.models import Order
+from menu.models import MenuItem
+from accounts.models import User
+
+
+class PublicStatsView(APIView):
+    """Public endpoint for homepage stats (no auth required)"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        total_shops = Shop.objects.filter(is_active=True).count()
+        total_customers = User.objects.filter(role='customer').count()
+        total_menu_items = MenuItem.objects.filter(is_active=True).count()
+        # Daily orders: orders placed today
+        today = timezone.now().date()
+        daily_orders = Order.objects.filter(ordered_at__date=today).count()
+
+        return Response({
+            'shops': total_shops,
+            'daily_orders': daily_orders,
+            'menu_items': total_menu_items,
+            'customers': total_customers,
+        })

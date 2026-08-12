@@ -24,7 +24,9 @@ from whatsapp.services import WhatsAppService
 import random
 from django.core.cache import cache
 import logging
-# accounts/views.py
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.contrib.auth import update_session_auth_hash
 
 import random
 from rest_framework import status
@@ -120,7 +122,7 @@ class VerifyOTPView(APIView):
                 "access": str(refresh.access_token),
                 "user": UserSerializer(user).data
             }, status=status.HTTP_201_CREATED)
-       
+
 
 class CustomerRegisterView(APIView):
 
@@ -240,7 +242,7 @@ class CustomerRegisterView(APIView):
                 },
                 status=400
             )
-            
+
 
 
 class FirebaseLoginView(APIView):
@@ -326,7 +328,7 @@ class FirebaseLoginView(APIView):
                 },
                 status=400
             )
-            
+
 
 
 class PasswordLoginView(APIView):
@@ -465,7 +467,7 @@ class SaveFCMTokenView(APIView):
             "message":
             "FCM Token Saved"
         })
-        
+
 
 class ManagerListView(APIView):
 
@@ -523,8 +525,8 @@ class CreateManagerView(APIView):
             "message":
             "Manager Created"
         })
-        
-        
+
+
 
 class ManagerDetailView(
     generics.RetrieveUpdateDestroyAPIView
@@ -632,8 +634,8 @@ class AssignManagerView(APIView):
             "message":
             "Manager Assigned"
         })
-        
-        
+
+
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -645,7 +647,7 @@ from orders.models import Order
 from rest_framework.exceptions import PermissionDenied
 from .utils import manager_can_access_customer
 
-        
+
 class CustomerListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated, IsSuperAdminOrManagerOrSelf]
     serializer_class = CustomerListSerializer
@@ -686,8 +688,8 @@ class CustomerListView(generics.ListAPIView):
 
         # Customer role: no list
         return queryset.none()
-    
- 
+
+
 class CustomerSelfProfileView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = CustomerProfileSerializer
@@ -697,14 +699,14 @@ class CustomerSelfProfileView(generics.RetrieveUpdateAPIView):
 
     def update(self, request, *args, **kwargs):
         user = self.get_object()
-        # Only allow safe fields
-        allowed_fields = ['first_name', 'last_name', 'phone', 'email']
+        # Allow only name and email; phone is updated separately via OTP
+        allowed_fields = ['first_name', 'last_name', 'email']
         for field in allowed_fields:
             if field in request.data:
                 setattr(user, field, request.data[field])
         user.save()
         return Response({'message': 'Profile updated successfully'})
-       
+
 
 class CustomerDetailView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated, IsSuperAdminOrManagerOrSelf]
@@ -731,8 +733,8 @@ class CustomerDetailView(generics.RetrieveUpdateAPIView):
             return Response({'message': f"User {'blocked' if not is_active else 'unblocked'} successfully"})
 
         return Response({'message': 'User updated successfully'})
-    
-    
+
+
 def manager_can_access_customer(manager_user, customer_user):
     # Determine shop
     shop = None
@@ -831,9 +833,9 @@ class CustomerToggleBlockView(generics.UpdateAPIView):
         return Response({
             'message': f"User {'blocked' if not is_active else 'unblocked'} successfully",
             'is_active': customer.is_active
-        })        
-        
-        
+        })
+
+
 # ---------- Super Admin Dashboard Stats ----------
 class SuperAdminDashboardStatsView(APIView):
     permission_classes = [IsAuthenticated, IsSuperAdmin]
@@ -989,3 +991,257 @@ class SuperAdminTopProductsView(APIView):
                 'total_quantity': item['total_quantity'],
             })
         return Response(data)
+
+
+# ---------- Change / Assign Password ----------
+class ChangePasswordView(APIView):
+    """
+    PUT /api/accounts/change-password/
+    For authenticated user.
+    If user has no password set (e.g., social login), allow setting a new password without old password.
+    Otherwise, require old password.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        user = request.user
+        new_password = request.data.get("new_password")
+        if not new_password:
+            return Response(
+                {"error": "New password is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate password strength
+        try:
+            validate_password(new_password, user)
+        except ValidationError as e:
+            return Response(
+                {"error": e.messages},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check if user has a usable password (i.e., password is set)
+        has_password = user.has_usable_password()
+
+        if has_password:
+            old_password = request.data.get("old_password")
+            if not old_password:
+                return Response(
+                    {"error": "Old password is required to change password."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            if not user.check_password(old_password):
+                return Response(
+                    {"error": "Old password is incorrect."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Set new password
+        user.set_password(new_password)
+        user.save()
+        # Keep the user logged in after password change
+        update_session_auth_hash(request, user)
+
+        return Response(
+            {"message": "Password updated successfully."},
+            status=status.HTTP_200_OK
+        )
+
+
+# ---------- Phone Update with OTP ----------
+class SendPhoneUpdateOTPView(APIView):
+    """
+    POST /api/accounts/send-phone-update-otp/
+    Requires authentication.
+    Body: { "new_phone": "+919999999999" }
+    Sends OTP to the new phone number.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        new_phone = request.data.get("new_phone")
+        if not new_phone:
+            return Response(
+                {"error": "New phone number is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check if new phone is already registered by another user
+        if User.objects.filter(phone=new_phone).exclude(id=request.user.id).exists():
+            return Response(
+                {"error": "This phone number is already registered."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Generate OTP and store in cache with a key specific to this user and new phone
+        otp = random.randint(100000, 999999)
+        cache_key = f"phone_update_{request.user.id}_{new_phone}"
+        cache.set(cache_key, otp, timeout=300)  # 5 minutes
+
+        # Send OTP via WhatsApp
+        try:
+            WhatsAppService.send_otp(new_phone, str(otp))
+        except Exception as e:
+            logger.error(f"Failed to send phone update OTP: {e}")
+            return Response(
+                {"error": "Failed to send OTP. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response(
+            {"message": "OTP sent to the new phone number."},
+            status=status.HTTP_200_OK
+        )
+
+
+class VerifyPhoneUpdateOTPView(APIView):
+    """
+    POST /api/accounts/verify-phone-update-otp/
+    Requires authentication.
+    Body: { "new_phone": "+919999999999", "otp": "123456" }
+    Verifies OTP and updates the user's phone number.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        new_phone = request.data.get("new_phone")
+        otp = request.data.get("otp")
+
+        if not new_phone or not otp:
+            return Response(
+                {"error": "New phone and OTP are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        cache_key = f"phone_update_{user.id}_{new_phone}"
+        cached_otp = cache.get(cache_key)
+
+        if not cached_otp or str(cached_otp) != str(otp):
+            return Response(
+                {"error": "Invalid or expired OTP."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check again if phone is taken (avoid race condition)
+        if User.objects.filter(phone=new_phone).exclude(id=user.id).exists():
+            return Response(
+                {"error": "This phone number is already registered."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Update user's phone
+        user.phone = new_phone
+        user.username = new_phone  # username is phone, keep consistent
+        user.save()
+
+        # Clear cache
+        cache.delete(cache_key)
+
+        return Response(
+            {"message": "Phone number updated successfully."},
+            status=status.HTTP_200_OK
+        )
+
+
+# ---------- Forgot Password (Reset via OTP) ----------
+class SendPasswordResetOTPView(APIView):
+    """
+    POST /api/accounts/send-password-reset-otp/
+    No authentication required.
+    Body: { "phone": "+919999999999" }
+    Sends OTP to the registered phone for password reset.
+    """
+    permission_classes = []
+
+    def post(self, request):
+        phone = request.data.get("phone")
+        if not phone:
+            return Response(
+                {"error": "Phone number is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            user = User.objects.get(phone=phone)
+        except User.DoesNotExist:
+            return Response(
+                {"error": "No account found with this phone number."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        otp = random.randint(100000, 999999)
+        cache_key = f"password_reset_{phone}"
+        cache.set(cache_key, otp, timeout=300)
+
+        try:
+            WhatsAppService.send_otp(phone, str(otp))
+        except Exception as e:
+            logger.error(f"Failed to send password reset OTP: {e}")
+            return Response(
+                {"error": "Failed to send OTP. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response(
+            {"message": "OTP sent to your registered phone number."},
+            status=status.HTTP_200_OK
+        )
+
+
+class VerifyPasswordResetOTPView(APIView):
+    """
+    POST /api/accounts/verify-password-reset-otp/
+    No authentication required.
+    Body: { "phone": "+919999999999", "otp": "123456", "new_password": "newpassword123" }
+    Verifies OTP and resets password.
+    """
+    permission_classes = []
+
+    def post(self, request):
+        phone = request.data.get("phone")
+        otp = request.data.get("otp")
+        new_password = request.data.get("new_password")
+
+        if not phone or not otp or not new_password:
+            return Response(
+                {"error": "Phone, OTP, and new password are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        cache_key = f"password_reset_{phone}"
+        cached_otp = cache.get(cache_key)
+
+        if not cached_otp or str(cached_otp) != str(otp):
+            return Response(
+                {"error": "Invalid or expired OTP."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            user = User.objects.get(phone=phone)
+        except User.DoesNotExist:
+            return Response(
+                {"error": "User not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Validate new password
+        try:
+            validate_password(new_password, user)
+        except ValidationError as e:
+            return Response(
+                {"error": e.messages},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user.set_password(new_password)
+        user.save()
+
+        cache.delete(cache_key)
+
+        return Response(
+            {"message": "Password reset successfully. You can now login with your new password."},
+            status=status.HTTP_200_OK
+        )

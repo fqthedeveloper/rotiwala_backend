@@ -22,6 +22,7 @@ from .views import (
     ReportView,
     ExportReportView,
     TestView,
+    PublicStatsView,
 )
 
 urlpatterns = [
@@ -48,5 +49,6 @@ urlpatterns = [
     path('report/', ReportView.as_view(), name='report'),
     path('export/', ExportReportView.as_view(), name='export-report'),
     path('test/', TestView.as_view(), name='test-view'),  # New test endpoint
-    
+    path('stats/', PublicStatsView.as_view(), name='public-stats'),
+
 ]

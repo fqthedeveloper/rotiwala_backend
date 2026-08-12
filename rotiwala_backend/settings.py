@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "discounts",
     'django_extensions',
     "whatsapp",
+    "videos",
 ]
 
 MIDDLEWARE = [

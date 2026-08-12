@@ -23,8 +23,12 @@ from .views import (
     SendOTPView,
     TestWhatsAppView,
     VerifyOTPView,
-
-    
+    VerifyOTPView,
+    ChangePasswordView,
+    SendPhoneUpdateOTPView,
+    VerifyPhoneUpdateOTPView,
+    SendPasswordResetOTPView,
+    VerifyPasswordResetOTPView,
 )
 
 urlpatterns = [
@@ -65,12 +69,12 @@ urlpatterns = [
         "assign-manager/",
         AssignManagerView.as_view()
     ),
-    
+
     path(
         "managers/<int:pk>/",
         ManagerDetailView.as_view()
     ),
-    
+
     path('customers/', CustomerListView.as_view(), name='customer-list'),
     path('customers/<int:pk>/', CustomerDetailView.as_view(), name='customer-detail'),
     path('profile/', CustomerSelfProfileView.as_view(), name='self-profile'),  # new
@@ -82,5 +86,15 @@ urlpatterns = [
     path('superadmin/dashboard/revenue_trend/', SuperAdminRevenueTrendView.as_view(), name='superadmin-revenue-trend'),
     path('superadmin/dashboard/orders_by_shop/', SuperAdminOrdersByShopView.as_view(), name='superadmin-orders-by-shop'),
     path('superadmin/dashboard/top_products/', SuperAdminTopProductsView.as_view(), name='superadmin-top-products'),
+    # Password change (authenticated)
+    path('change-password/', ChangePasswordView.as_view(), name='change-password'),
+
+    # Phone update with OTP (authenticated)
+    path('send-phone-update-otp/', SendPhoneUpdateOTPView.as_view(), name='send-phone-update-otp'),
+    path('verify-phone-update-otp/', VerifyPhoneUpdateOTPView.as_view(), name='verify-phone-update-otp'),
+
+    # Forgot password (reset via OTP) - no auth
+    path('send-password-reset-otp/', SendPasswordResetOTPView.as_view(), name='send-password-reset-otp'),
+    path('verify-password-reset-otp/', VerifyPasswordResetOTPView.as_view(), name='verify-password-reset-otp'),
 
 ]

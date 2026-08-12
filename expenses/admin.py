@@ -21,3 +21,11 @@ admin.site.register(
 admin.site.register(
     MaintenanceExpense
 )
+
+admin.site.register(
+    Vendor
+)
+
+admin.site.register(
+    RawMaterialExpense
+)

@@ -46,22 +46,22 @@ urlpatterns = [
         "api/expenses/",
         include("expenses.urls")
     ),
-    
+
     path(
         "api/reports/",
         include("reports.urls")
     ),
-    
+
     path(
         "api/contact/",
         include("contact.urls")
     ),
-    
+
     path(
         "api/discounts/",
         include("discounts.urls")
     ),
-    
+
     path(
         "api/coupons/",
         include(
@@ -69,6 +69,7 @@ urlpatterns = [
         )
     ),
     path('api/whatsapp/', include('whatsapp.urls')),
+    path('api/videos/', include('videos.urls')),
 
     ]
 

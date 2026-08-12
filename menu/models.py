@@ -3,20 +3,8 @@ from shops.models import Shop
 
 class MenuCategory(models.Model):
 
-    shop = models.ForeignKey(
-        Shop,
-        on_delete=models.CASCADE,
-        related_name="categories"
-    )
-
     name = models.CharField(
         max_length=100
-    )
-
-    image = models.ImageField(
-        upload_to="categories/",
-        blank=True,
-        null=True
     )
 
     is_active = models.BooleanField(
@@ -29,7 +17,7 @@ class MenuCategory(models.Model):
 
     def __str__(self):
         return self.name
-    
+
 
 class MenuItem(models.Model):
 
@@ -79,4 +67,4 @@ class MenuItem(models.Model):
 
     def __str__(self):
         return self.name
-    
+
