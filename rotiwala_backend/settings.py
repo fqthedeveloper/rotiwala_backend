@@ -196,6 +196,17 @@ CHANNEL_LAYERS = {
 
 }
 
+TEMPLATES[0]['OPTIONS']['debug'] = False
+
+# Use less memory for caching
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'unique-snowflake',
+    }
+}
+
+
 # CHANNEL_LAYERS = {
 #     "default": {
 #         "BACKEND":
