@@ -70,6 +70,7 @@ urlpatterns = [
     ),
     path('api/whatsapp/', include('whatsapp.urls')),
     path('api/videos/', include('videos.urls')),
+    path('api/delivery/', include('delivery.urls')),
 
     ]
 

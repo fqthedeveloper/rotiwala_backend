@@ -426,6 +426,9 @@ class WalkInCart(models.Model):
     updated_at = models.DateTimeField(
         auto_now=True
     )
+    
+    token_number = models.CharField(max_length=10, null=True, blank=True, db_index=True)
+    business_date = models.DateField(null=True, blank=True, db_index=True)
 
     class Meta:
 

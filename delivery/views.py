@@ -1,0 +1,457 @@
+# delivery/views.py
+
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from rest_framework import viewsets, status, generics
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.core.exceptions import ValidationError
+from django.utils import timezone
+
+from orders.models import Order
+from shops.models import Shop
+from accounts.models import User
+from .models import (
+    DeliveryBoyProfile, DeliveryAssignment, Parcel,
+    DeliveryLocation, WalkInTokenCounter
+)
+from .serializers import (
+    DeliveryBoyProfileSerializer, DeliveryBoyProfileDetailSerializer,
+    DeliveryAssignmentSerializer, ParcelSerializer,
+    DeliveryLocationSerializer, WalkInTokenCounterSerializer
+)
+from .permissions import (
+    IsDeliveryBoy, IsManagerOrSuperAdmin, IsOwnShopManager, IsOwnDeliveryBoy
+)
+from .services import (
+    validate_delivery_location, create_parcel_for_order,
+    assign_delivery_manually, auto_assign_delivery,
+    scan_parcel, confirm_pickup, confirm_out_for_delivery,
+    confirm_delivery, haversine_distance
+)
+
+
+# ============================================================
+#  DELIVERY BOY PROFILE VIEWS
+# ============================================================
+
+class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
+    queryset = DeliveryBoyProfile.objects.all()
+    serializer_class = DeliveryBoyProfileSerializer
+    permission_classes = [IsAuthenticated, IsManagerOrSuperAdmin | IsDeliveryBoy]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'super_admin':
+            return DeliveryBoyProfile.objects.all()
+        elif user.role == 'manager':
+            shop = user.manager_profile.shop
+            return DeliveryBoyProfile.objects.filter(shop=shop)
+        elif user.role == 'delivery_boy':
+            return DeliveryBoyProfile.objects.filter(user=user)
+        return DeliveryBoyProfile.objects.none()
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return DeliveryBoyProfileDetailSerializer
+        return DeliveryBoyProfileSerializer
+
+    @action(detail=True, methods=['post'])
+    def toggle_online(self, request, pk=None):
+        """Toggle delivery boy's online status."""
+        profile = self.get_object()
+        if request.user.role == 'delivery_boy' and profile.user != request.user:
+            return Response({'error': 'You can only update your own status.'}, status=status.HTTP_403_FORBIDDEN)
+
+        profile.is_online = not profile.is_online
+        if not profile.is_online:
+            profile.is_available = False
+        profile.save(update_fields=['is_online', 'is_available'])
+        return Response(DeliveryBoyProfileSerializer(profile).data)
+
+    @action(detail=True, methods=['post'])
+    def toggle_available(self, request, pk=None):
+        """Toggle delivery boy's availability."""
+        profile = self.get_object()
+        if request.user.role == 'delivery_boy' and profile.user != request.user:
+            return Response({'error': 'You can only update your own status.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if not profile.is_online:
+            return Response({'error': 'Cannot set available while offline.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        profile.is_available = not profile.is_available
+        profile.save(update_fields=['is_available'])
+        return Response(DeliveryBoyProfileSerializer(profile).data)
+
+
+# ============================================================
+#  DELIVERY ASSIGNMENT VIEWS
+# ============================================================
+
+class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
+    queryset = DeliveryAssignment.objects.all()
+    serializer_class = DeliveryAssignmentSerializer
+    permission_classes = [IsAuthenticated, IsManagerOrSuperAdmin | IsDeliveryBoy]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'super_admin':
+            return DeliveryAssignment.objects.all()
+        elif user.role == 'manager':
+            shop = user.manager_profile.shop
+            return DeliveryAssignment.objects.filter(shop=shop)
+        elif user.role == 'delivery_boy':
+            profile = get_object_or_404(DeliveryBoyProfile, user=user)
+            return DeliveryAssignment.objects.filter(delivery_boy=profile)
+        return DeliveryAssignment.objects.none()
+
+    @action(detail=False, methods=['post'])
+    def assign(self, request):
+        """Manual assignment endpoint."""
+        order_id = request.data.get('order_id')
+        delivery_boy_id = request.data.get('delivery_boy_id')
+
+        if not order_id or not delivery_boy_id:
+            return Response({'error': 'order_id and delivery_boy_id are required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        order = get_object_or_404(Order, id=order_id)
+        delivery_boy = get_object_or_404(DeliveryBoyProfile, id=delivery_boy_id)
+
+        # Check permissions
+        user = request.user
+        if user.role == 'manager':
+            if user.manager_profile.shop != order.shop:
+                return Response({'error': 'You can only assign orders from your shop.'},
+                                status=status.HTTP_403_FORBIDDEN)
+            if delivery_boy.shop != order.shop:
+                return Response({'error': 'Delivery boy does not belong to your shop.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        elif user.role != 'super_admin':
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            assignment = assign_delivery_manually(order, delivery_boy)
+            return Response(DeliveryAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'])
+    def auto_assign(self, request):
+        """Automatic assignment endpoint."""
+        order_id = request.data.get('order_id')
+
+        if not order_id:
+            return Response({'error': 'order_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = get_object_or_404(Order, id=order_id)
+
+        user = request.user
+        if user.role == 'manager':
+            if user.manager_profile.shop != order.shop:
+                return Response({'error': 'You can only auto-assign orders from your shop.'},
+                                status=status.HTTP_403_FORBIDDEN)
+        elif user.role != 'super_admin':
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            assignment = auto_assign_delivery(order)
+            return Response(DeliveryAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        """Delivery boy accepts assignment."""
+        assignment = self.get_object()
+        if request.user.role != 'delivery_boy':
+            return Response({'error': 'Only delivery boys can accept assignments.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if assignment.delivery_boy.user != request.user:
+            return Response({'error': 'This assignment is not for you.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if assignment.status != 'assigned':
+            return Response({'error': f'Cannot accept. Current status: {assignment.status}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            assignment.status = 'accepted'
+            assignment.accepted_at = timezone.now()
+            assignment.save(update_fields=['status', 'accepted_at'])
+
+        return Response(DeliveryAssignmentSerializer(assignment).data)
+
+    @action(detail=True, methods=['post'])
+    def pickup(self, request, pk=None):
+        """Confirm pickup after QR scan."""
+        assignment = self.get_object()
+        if request.user.role != 'delivery_boy':
+            return Response({'error': 'Only delivery boys can confirm pickup.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        delivery_boy = get_object_or_404(DeliveryBoyProfile, user=request.user)
+
+        try:
+            assignment = confirm_pickup(assignment, delivery_boy)
+            return Response(DeliveryAssignmentSerializer(assignment).data)
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def out_for_delivery(self, request, pk=None):
+        """Mark as out for delivery."""
+        assignment = self.get_object()
+        if request.user.role != 'delivery_boy':
+            return Response({'error': 'Only delivery boys can update status.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        delivery_boy = get_object_or_404(DeliveryBoyProfile, user=request.user)
+
+        try:
+            assignment = confirm_out_for_delivery(assignment, delivery_boy)
+            return Response(DeliveryAssignmentSerializer(assignment).data)
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def deliver(self, request, pk=None):
+        """Confirm delivery completion."""
+        assignment = self.get_object()
+        if request.user.role != 'delivery_boy':
+            return Response({'error': 'Only delivery boys can confirm delivery.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        delivery_boy = get_object_or_404(DeliveryBoyProfile, user=request.user)
+
+        try:
+            assignment = confirm_delivery(assignment, delivery_boy)
+            return Response(DeliveryAssignmentSerializer(assignment).data)
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ============================================================
+#  PARCEL VIEWS
+# ============================================================
+
+class ParcelViewSet(viewsets.ModelViewSet):
+    queryset = Parcel.objects.all()
+    serializer_class = ParcelSerializer
+    permission_classes = [IsAuthenticated, IsManagerOrSuperAdmin | IsDeliveryBoy]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'super_admin':
+            return Parcel.objects.all()
+        elif user.role == 'manager':
+            shop = user.manager_profile.shop
+            return Parcel.objects.filter(shop=shop)
+        elif user.role == 'delivery_boy':
+            profile = get_object_or_404(DeliveryBoyProfile, user=user)
+            return Parcel.objects.filter(
+                delivery_assignment__delivery_boy=profile
+            )
+        return Parcel.objects.none()
+
+    @action(detail=False, methods=['post'])
+    def scan(self, request):
+        """QR scan endpoint."""
+        qr_token = request.data.get('qr_token')
+        if not qr_token:
+            return Response({'error': 'qr_token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.user.role != 'delivery_boy':
+            return Response({'error': 'Only delivery boys can scan QR codes.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        delivery_boy = get_object_or_404(DeliveryBoyProfile, user=request.user)
+
+        try:
+            parcel, assignment = scan_parcel(qr_token, delivery_boy)
+            return Response({
+                'parcel': ParcelSerializer(parcel).data,
+                'assignment': DeliveryAssignmentSerializer(assignment).data,
+                'order': {
+                    'order_number': parcel.order.order_number,
+                    'customer_name': parcel.order.customer_name,
+                    'customer_phone': parcel.order.customer_phone,
+                    'delivery_address': parcel.order.delivery_address,
+                    'total_amount': str(parcel.order.total_amount),
+                }
+            })
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ============================================================
+#  GPS LOCATION VIEWS
+# ============================================================
+
+class DeliveryLocationViewSet(viewsets.ModelViewSet):
+    queryset = DeliveryLocation.objects.all()
+    serializer_class = DeliveryLocationSerializer
+    permission_classes = [IsAuthenticated, IsDeliveryBoy | IsManagerOrSuperAdmin]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'super_admin':
+            return DeliveryLocation.objects.all()
+        elif user.role == 'manager':
+            shop = user.manager_profile.shop
+            return DeliveryLocation.objects.filter(delivery_boy__shop=shop)
+        elif user.role == 'delivery_boy':
+            profile = get_object_or_404(DeliveryBoyProfile, user=user)
+            return DeliveryLocation.objects.filter(delivery_boy=profile)
+        return DeliveryLocation.objects.none()
+
+    def create(self, request, *args, **kwargs):
+        """Create a GPS location update."""
+        if request.user.role != 'delivery_boy':
+            return Response({'error': 'Only delivery boys can update location.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        delivery_boy = get_object_or_404(DeliveryBoyProfile, user=request.user)
+
+        latitude = request.data.get('latitude')
+        longitude = request.data.get('longitude')
+
+        if not latitude or not longitude:
+            return Response({'error': 'latitude and longitude are required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Update delivery boy's current location
+        delivery_boy.update_location(latitude, longitude)
+
+        # Create history record
+        location = DeliveryLocation.objects.create(
+            delivery_boy=delivery_boy,
+            assignment=request.data.get('assignment'),
+            latitude=latitude,
+            longitude=longitude,
+            accuracy=request.data.get('accuracy'),
+            speed=request.data.get('speed'),
+        )
+
+        return Response(DeliveryLocationSerializer(location).data, status=status.HTTP_201_CREATED)
+
+
+# ============================================================
+#  DELIVERY STATISTICS VIEWS
+# ============================================================
+
+class DeliveryStatisticsView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated, IsManagerOrSuperAdmin]
+
+    def get(self, request):
+        user = request.user
+
+        if user.role == 'super_admin':
+            assignments = DeliveryAssignment.objects.filter(status='delivered')
+            boys = DeliveryBoyProfile.objects.all()
+        elif user.role == 'manager':
+            shop = user.manager_profile.shop
+            assignments = DeliveryAssignment.objects.filter(shop=shop, status='delivered')
+            boys = DeliveryBoyProfile.objects.filter(shop=shop)
+        else:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Business day "today"
+        from .models import get_business_date
+        today = get_business_date()
+
+        # Aggregate statistics
+        total_completed = assignments.count()
+        total_distance = sum(float(a.estimated_distance_km or 0) for a in assignments)
+
+        today_assignments = assignments.filter(delivered_at__date=today)
+        today_completed = today_assignments.count()
+        today_distance = sum(float(a.estimated_distance_km or 0) for a in today_assignments)
+
+        # Weekly (last 7 days)
+        week_ago = timezone.now() - timezone.timedelta(days=7)
+        week_assignments = assignments.filter(delivered_at__gte=week_ago)
+        week_completed = week_assignments.count()
+        week_distance = sum(float(a.estimated_distance_km or 0) for a in week_assignments)
+
+        # Monthly (last 30 days)
+        month_ago = timezone.now() - timezone.timedelta(days=30)
+        month_assignments = assignments.filter(delivered_at__gte=month_ago)
+        month_completed = month_assignments.count()
+        month_distance = sum(float(a.estimated_distance_km or 0) for a in month_assignments)
+
+        # Average
+        avg_distance = total_distance / total_completed if total_completed > 0 else 0
+        avg_time = None  # Could calculate from assigned_at to delivered_at
+
+        data = {
+            'total': {
+                'completed': total_completed,
+                'distance_km': round(total_distance, 2),
+            },
+            'today': {
+                'completed': today_completed,
+                'distance_km': round(today_distance, 2),
+            },
+            'weekly': {
+                'completed': week_completed,
+                'distance_km': round(week_distance, 2),
+            },
+            'monthly': {
+                'completed': month_completed,
+                'distance_km': round(month_distance, 2),
+            },
+            'average': {
+                'distance_km': round(avg_distance, 2),
+            },
+            'delivery_boys': DeliveryBoyProfileSerializer(boys, many=True).data,
+        }
+
+        return Response(data)
+
+
+# ============================================================
+#  DASHBOARD VIEWS
+# ============================================================
+
+class DeliveryDashboardView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated, IsManagerOrSuperAdmin]
+
+    def get(self, request):
+        user = request.user
+
+        if user.role == 'super_admin':
+            assignments = DeliveryAssignment.objects.filter(status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery'])
+            boys = DeliveryBoyProfile.objects.filter(is_online=True)
+        elif user.role == 'manager':
+            shop = user.manager_profile.shop
+            assignments = DeliveryAssignment.objects.filter(shop=shop, status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery'])
+            boys = DeliveryBoyProfile.objects.filter(shop=shop, is_online=True)
+        else:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Active deliveries
+        active = []
+        for assignment in assignments:
+            active.append({
+                'assignment': DeliveryAssignmentSerializer(assignment).data,
+                'order': {
+                    'order_number': assignment.order.order_number,
+                    'customer_name': assignment.order.customer_name,
+                    'customer_phone': assignment.order.customer_phone,
+                },
+                'delivery_boy': {
+                    'id': assignment.delivery_boy.id,
+                    'full_name': assignment.delivery_boy.full_name,
+                    'current_latitude': str(assignment.delivery_boy.current_latitude),
+                    'current_longitude': str(assignment.delivery_boy.current_longitude),
+                    'last_location_at': assignment.delivery_boy.last_location_at,
+                }
+            })
+
+        return Response({
+            'active_deliveries': active,
+            'online_boys': DeliveryBoyProfileSerializer(boys, many=True).data,
+        })

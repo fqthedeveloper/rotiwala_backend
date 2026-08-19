@@ -76,6 +76,19 @@ class Shop(models.Model):
     updated_at = models.DateTimeField(
         auto_now=True
     )
+    
+    delivery_enabled = models.BooleanField(default=True)
+    delivery_radius_km = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=2.00,
+        help_text="Maximum delivery radius in kilometers"
+    )
+    delivery_assignment_mode = models.CharField(
+        max_length=10,
+        choices=(('manual', 'Manual'), ('auto', 'Automatic')),
+        default='manual'
+    )
 
     class Meta:
         ordering = ["name"]

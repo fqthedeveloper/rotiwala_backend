@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'django_extensions',
     "whatsapp",
     "videos",
+    "delivery",
 ]
 
 MIDDLEWARE = [
