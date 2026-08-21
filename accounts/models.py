@@ -1,10 +1,11 @@
+# accounts/models.py
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from shops.models import Shop
 
 
 class User(AbstractUser):
-
     ROLE_CHOICES = (
         ("super_admin", "Super Admin"),
         ("manager", "Manager"),
@@ -53,7 +54,6 @@ class User(AbstractUser):
 
 
 class CustomerProfile(models.Model):
-
     user = models.OneToOneField(
         User,
         on_delete=models.CASCADE
@@ -91,9 +91,7 @@ class CustomerProfile(models.Model):
         return self.user.username
 
 
-
 class ManagerProfile(models.Model):
-
     user = models.OneToOneField(
         User,
         on_delete=models.CASCADE,
@@ -135,10 +133,9 @@ class ManagerProfile(models.Model):
 
     def __str__(self):
         return self.full_name
-    
+
 
 class CustomerFlag(models.Model):
-
     customer = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -160,4 +157,52 @@ class CustomerFlag(models.Model):
 
     def __str__(self):
         return f"{self.customer.username}"
+
+
+# ============================================================
+# NEW: Customer Delivery Address
+# ============================================================
+
+class CustomerDeliveryAddress(models.Model):
+    """
+    Saved delivery addresses for customers.
+    """
+    customer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='delivery_addresses'
+    )
+    label = models.CharField(
+        max_length=50,
+        default='Home',
+        help_text="e.g., Home, Work, Office"
+    )
+    address = models.TextField()
     
+    latitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6
+    )
+
+    longitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6
+    )
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', '-updated_at']
+        unique_together = [['customer', 'latitude', 'longitude']]  # avoid duplicates
+
+    def __str__(self):
+        return f"{self.customer.get_full_name()} - {self.label} ({self.address[:30]})"
+
+    def save(self, *args, **kwargs):
+        # If this address is set as default, unset any other default for the same customer
+        if self.is_default:
+            CustomerDeliveryAddress.objects.filter(
+                customer=self.customer, is_default=True
+            ).exclude(id=self.id).update(is_default=False)
+        super().save(*args, **kwargs)

@@ -9,12 +9,12 @@ from decimal import Decimal
 from django.db import IntegrityError
 from django.utils.dateparse import parse_datetime
 from whatsapp.services import WhatsAppService   
+import logging
+from django.db import transaction
+from django.core.exceptions import ValidationError
+from delivery.services import create_parcel_for_order, auto_assign_delivery
+from delivery.consumers import notify_delivery_assignment
 
-
-from accounts.models import (
-    User,
-    CustomerProfile
-)
 
 from cart.models import (
     Cart,
@@ -60,7 +60,7 @@ from django.db import transaction
 from discounts.offer_engine import OfferEngine                          # <-- import OfferEngine
 from discounts.models import Discount, DiscountUsage                # <-- for usage tracking
 from discounts.coupon_models import CouponUsage            # <-- for coupon usage
-
+from accounts.models import CustomerDeliveryAddress, User, CustomerProfile
 
 import math
 
@@ -101,7 +101,7 @@ class PlaceOrderView(APIView):
     @transaction.atomic
     def post(self, request):
         # ============================================
-        # 1. Validate basic inputs (unchanged)
+        # 1. Validate basic inputs
         # ============================================
         shop_id = request.data.get("shop_id")
         if not shop_id:
@@ -122,31 +122,83 @@ class PlaceOrderView(APIView):
             return Response({"error": "Cart Empty"}, status=400)
 
         # -------------------------------------------
-        # Delivery option and address
+        # Delivery option and address handling (UPDATED)
         # -------------------------------------------
         delivery_option = request.data.get("delivery_option", "pickup")
-        delivery_address = request.data.get("delivery_address", "").strip()
-        delivery_lat = request.data.get("delivery_latitude")
-        delivery_lng = request.data.get("delivery_longitude")
+        delivery_address = ""
+        delivery_lat = None
+        delivery_lng = None
+        address_id = request.data.get("address_id")
+        save_address = request.data.get("save_address", False)
+        address_label = request.data.get("address_label", "Home")
 
         if delivery_option == "delivery":
-            if not delivery_address:
-                return Response({"error": "Delivery address is required"}, status=400)
-            if delivery_lat is None or delivery_lng is None:
-                return Response({"error": "Delivery latitude and longitude are required"}, status=400)
-            if shop.latitude is None or shop.longitude is None:
-                return Response({"error": "Shop location is not set, cannot deliver"}, status=400)
+            # If address_id is provided, use that saved address
+            if address_id:
+                try:
+                    saved_address = CustomerDeliveryAddress.objects.get(
+                        id=address_id,
+                        customer=request.user
+                    )
+                    delivery_address = saved_address.address
+                    delivery_lat = saved_address.latitude
+                    delivery_lng = saved_address.longitude
+                except CustomerDeliveryAddress.DoesNotExist:
+                    return Response(
+                        {"error": "Saved address not found."},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+            else:
+                # New address from request
+                delivery_address = request.data.get("delivery_address", "").strip()
+                delivery_lat = request.data.get("delivery_latitude")
+                delivery_lng = request.data.get("delivery_longitude")
+
+                if not delivery_address:
+                    return Response(
+                        {"error": "Delivery address is required"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                if delivery_lat is None or delivery_lng is None:
+                    return Response(
+                        {"error": "Delivery latitude and longitude are required"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                # Optionally save the address for future use
+                if save_address:
+                    try:
+                        CustomerDeliveryAddress.objects.create(
+                            customer=request.user,
+                            label=address_label,
+                            address=delivery_address,
+                            latitude=delivery_lat,
+                            longitude=delivery_lng,
+                            is_default=not CustomerDeliveryAddress.objects.filter(
+                                customer=request.user, is_default=True
+                            ).exists()
+                        )
+                    except Exception:
+                        pass  # ignore duplicates
+
+            # Validate distance using the shop's delivery_radius_km
+            if not shop.latitude or not shop.longitude:
+                return Response(
+                    {"error": "Shop location is not set, cannot deliver"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             distance = haversine(
                 float(shop.latitude), float(shop.longitude),
                 float(delivery_lat), float(delivery_lng)
             )
-            if distance > 2.0:
+            # Use shop's radius, fallback to 2.0 if not set
+            max_distance = float(shop.delivery_radius_km or 2.0)
+            if distance > max_distance:
                 return Response({
-                    "error": f"Shop is {distance:.2f} km away. We only deliver within 2 km."
-                }, status=400)
+                    "error": f"Shop is {distance:.2f} km away. We only deliver within {max_distance} km."
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         # -------------------------------------------
-        # Payment & pickup
+        # Payment & pickup (unchanged)
         # -------------------------------------------
         payment_method = request.data.get("payment_method", "cash")
         pickup_type = request.data.get("pickup_type", "instant")
@@ -179,7 +231,7 @@ class PlaceOrderView(APIView):
                 return Response({"error": "Pickup time must be in the future."}, status=400)
 
         # -------------------------------------------
-        # Promotion selection
+        # Promotion selection (unchanged)
         # -------------------------------------------
         promotion_type = request.data.get("promotion_type")
         promotion_id = request.data.get("promotion_id")
@@ -200,7 +252,7 @@ class PlaceOrderView(APIView):
                 return Response({"error": "Coupon not found"}, status=400)
 
         # ============================================
-        # 2. Estimate preparation time
+        # 2. Estimate preparation time (unchanged)
         # ============================================
         active_orders = Order.objects.filter(
             shop=shop, status__in=["accepted", "preparing"]
@@ -248,7 +300,7 @@ class PlaceOrderView(APIView):
         )
 
         # ============================================
-        # 4. Process the cart with OfferEngine
+        # 4. Process the cart with OfferEngine (unchanged)
         # ============================================
         engine = OfferEngine(
             customer=request.user,
@@ -282,7 +334,7 @@ class PlaceOrderView(APIView):
             )
 
         # ============================================
-        # 5. Save totals & promotion info
+        # 5. Save totals & promotion info (unchanged)
         # ============================================
         order.original_amount = original_amount
         order.discount_amount = discount_amount
@@ -301,7 +353,7 @@ class PlaceOrderView(APIView):
         order.save()
 
         # ============================================
-        # 6. Record usage
+        # 6. Record usage (unchanged)
         # ============================================
         if selected_discount:
             try:
@@ -338,21 +390,20 @@ class PlaceOrderView(APIView):
                 pass
 
         # ============================================
-        # 7. Update customer stats
+        # 7. Update customer stats (unchanged)
         # ============================================
         profile, created = CustomerProfile.objects.get_or_create(user=request.user)
         profile.total_orders += 1
         profile.save()
 
         # ============================================
-        # 8. Notify shop manager (PUSH + WHATSAPP)
+        # 8. Notify shop manager (unchanged)
         # ============================================
         manager = User.objects.filter(
             role="manager",
             manager_profile__shop=shop
         ).first()
 
-        # Push notification (existing)
         if manager and manager.fcm_token:
             send_push_notification(
                 token=manager.fcm_token,
@@ -365,9 +416,7 @@ class PlaceOrderView(APIView):
                 }
             )
 
-        # ✅ WhatsApp notification to manager
         if manager and manager.phone:
-            # Prepare pickup time display
             if order.pickup_type == "scheduled" and order.pickup_time:
                 pickup_display = order.pickup_time.strftime("%d %b %I:%M %p")
             else:
@@ -385,7 +434,7 @@ class PlaceOrderView(APIView):
                 logger.warning(f"Manager WhatsApp notification failed: {e}")
 
         # ============================================
-        # 9. Clear the cart
+        # 9. Clear the cart (unchanged)
         # ============================================
         cart_items.delete()
 
@@ -466,12 +515,23 @@ class AcceptOrderView(APIView):
 
     def post(self, request, pk):
         order = Order.objects.get(id=pk)
-        order.status = "accepted"
-        order.accepted_at = timezone.now()
-        order.save()
+
+        # ======================================================
+        # Atomic transition: ACCEPTED → PREPARING
+        # ======================================================
+        with transaction.atomic():
+            order.status = "accepted"
+            order.accepted_at = timezone.now()
+            order.save(update_fields=['status', 'accepted_at'])
+
+            # Automatically transition to PREPARING (no separate button)
+            order.status = "preparing"
+            order.save(update_fields=['status'])
+
+        # Send WebSocket update
         send_order_update(order)
 
-        # Push notification (optional)
+        # Push notification to customer (if available)
         if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
@@ -495,7 +555,6 @@ class AcceptOrderView(APIView):
                 logger.warning(f"Order accepted WhatsApp failed: {e}")
 
         return Response({"message": "Order Accepted"})
-
 
 
 # ==========================================
@@ -573,12 +632,33 @@ class ReadyOrderView(APIView):
 
     def post(self, request, pk):
         order = Order.objects.get(id=pk)
+
+        # Mark as READY
         order.status = "ready"
         order.ready_at = timezone.now()
-        order.save()
+        order.save(update_fields=['status', 'ready_at'])
+
+        # Send WebSocket update
         send_order_update(order)
 
-        # Push notification
+        # ======================================================
+        # NEW: If this is a delivery order, create a parcel
+        #      and optionally auto‑assign a delivery boy
+        # ======================================================
+        if order.delivery_option == 'delivery':
+            parcel = create_parcel_for_order(order)
+            if parcel and order.shop.delivery_assignment_mode == 'auto':
+                try:
+                    assignment = auto_assign_delivery(order)
+                    # Notify the assigned delivery boy via WebSocket
+                    notify_delivery_assignment(assignment)
+                except ValidationError as e:
+                    # Log the error but don't break the 'ready' flow
+                    logger.warning(f"Auto-assignment failed for order {order.id}: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error in auto-assignment for order {order.id}: {e}")
+
+        # Push notification to customer (existing)
         if order.customer and order.customer.fcm_token:
             send_push_notification(
                 token=order.customer.fcm_token,
@@ -587,7 +667,7 @@ class ReadyOrderView(APIView):
                 data={"type": "order", "status": "ready", "order_id": str(order.id)}
             )
 
-        # WhatsApp notification to customer
+        # WhatsApp notification to customer (existing)
         if order.customer and order.customer.phone:
             try:
                 WhatsAppService.send_order_ready(

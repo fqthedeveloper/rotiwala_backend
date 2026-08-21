@@ -30,7 +30,7 @@ from .services import (
     scan_parcel, confirm_pickup, confirm_out_for_delivery,
     confirm_delivery, haversine_distance
 )
-
+from orders.serializers import OrderSerializer
 
 # ============================================================
 #  DELIVERY BOY PROFILE VIEWS
@@ -455,3 +455,33 @@ class DeliveryDashboardView(generics.GenericAPIView):
             'active_deliveries': active,
             'online_boys': DeliveryBoyProfileSerializer(boys, many=True).data,
         })
+        
+class ReadyOrdersForDeliveryView(generics.ListAPIView):
+    """
+    List orders that are ready and have delivery option, not yet assigned.
+    """
+    permission_classes = [IsAuthenticated, IsManagerOrSuperAdmin]
+    serializer_class = OrderSerializer  # or a custom serializer
+
+    def get_queryset(self):
+        user = self.request.user
+        
+        if user.role == 'manager':
+            shop = user.manager_profile.shop
+        elif user.role == 'super_admin':
+            shop_id = self.request.query_params.get('shop_id')
+            shop = get_object_or_404(Shop, id=shop_id) if shop_id else None
+        else:
+            return Order.objects.none()
+
+        if not shop:
+            return Order.objects.none()
+
+        # Get orders that are ready, delivery, and have no active assignment
+        return Order.objects.filter(
+            shop=shop,
+            status='ready',
+            delivery_option='delivery'
+        ).exclude(
+            delivery_assignment__status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
+        ).select_related('shop')

@@ -1,5 +1,7 @@
+# accounts/serializers.py
+
 from rest_framework import serializers
-from .models import User, CustomerProfile, CustomerFlag, ManagerProfile
+from .models import User, CustomerProfile, CustomerFlag, ManagerProfile, CustomerDeliveryAddress
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -66,7 +68,7 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             'username',
             'first_name',
             'last_name',
-            'full_name',          # <-- Added
+            'full_name',
             'phone',
             'email',
             'is_active',
@@ -88,7 +90,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
     trust_score = serializers.IntegerField(source='customerprofile.trust_score')
     total_orders = serializers.IntegerField(source='customerprofile.total_orders')
     is_flagged = serializers.BooleanField(source='customerprofile.is_flagged')
-    is_active = serializers.BooleanField()          # directly from User
+    is_active = serializers.BooleanField()
     flag_count = serializers.IntegerField(source='customer_flags.count')
 
     class Meta:
@@ -124,3 +126,17 @@ class ManagerSerializer(serializers.ModelSerializer):
         except:
             pass
         return None
+
+
+# ============================================================
+# NEW: Customer Delivery Address Serializer
+# ============================================================
+
+class CustomerDeliveryAddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomerDeliveryAddress
+        fields = [
+            'id', 'label', 'address', 'latitude', 'longitude',
+            'is_default', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']

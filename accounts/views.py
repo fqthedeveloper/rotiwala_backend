@@ -1245,3 +1245,60 @@ class VerifyPasswordResetOTPView(APIView):
             {"message": "Password reset successfully. You can now login with your new password."},
             status=status.HTTP_200_OK
         )
+        
+        
+
+# ============================================================
+# NEW: Customer Address ViewSet (add at the very bottom)
+# ============================================================
+
+from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.decorators import action
+from django.shortcuts import get_object_or_404
+from .models import CustomerDeliveryAddress
+from .serializers import CustomerDeliveryAddressSerializer
+
+
+class CustomerAddressViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for customers to manage their saved delivery addresses.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = CustomerDeliveryAddressSerializer
+
+    def get_queryset(self):
+        # Only return addresses belonging to the authenticated customer
+        return CustomerDeliveryAddress.objects.filter(customer=self.request.user)
+
+    def perform_create(self, serializer):
+        # Automatically set the customer to the logged-in user
+        serializer.save(customer=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def set_default(self, request, pk=None):
+        """
+        Set this address as the default for the customer.
+        """
+        address = self.get_object()
+        # Unset any existing default
+        CustomerDeliveryAddress.objects.filter(
+            customer=request.user, is_default=True
+        ).update(is_default=False)
+        address.is_default = True
+        address.save()
+        return Response({'status': 'default address set'}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'])
+    def default(self, request):
+        """
+        Get the default address for the customer.
+        """
+        address = CustomerDeliveryAddress.objects.filter(
+            customer=request.user, is_default=True
+        ).first()
+        if address:
+            serializer = self.get_serializer(address)
+            return Response(serializer.data)
+        return Response({'detail': 'No default address set.'}, status=status.HTTP_404_NOT_FOUND)
