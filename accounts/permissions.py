@@ -57,3 +57,35 @@ class IsSuperAdminOrManagerOrSelf(BasePermission):
         if user.role == 'customer':
             return obj == user
         return False
+    
+
+# ============================================================
+# NEW PERMISSION: Manager can read own shop
+# ============================================================
+
+class CanReadOwnShop(BasePermission):
+    """
+    Custom permission:
+    - Super admin: full access (GET, PUT, PATCH, DELETE)
+    - Manager: can only retrieve (GET) their own shop
+    """
+    def has_permission(self, request, view):
+        return request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        # Super admin can do anything
+        if user.role == 'super_admin':
+            return True
+        # Manager: allow only safe methods (GET, HEAD, OPTIONS)
+        if user.role == 'manager':
+            if request.method in ('GET', 'HEAD', 'OPTIONS'):
+                try:
+                    profile = user.manager_profile
+                    # Check if this shop belongs to the manager
+                    return profile.shop and profile.shop.id == obj.id
+                except:
+                    return False
+            return False
+        # Any other role: no access
+        return False

@@ -1,3 +1,5 @@
+# menu/serializers.py
+
 from rest_framework import serializers
 from .models import MenuCategory, MenuItem
 from discounts.services import get_discounted_price
@@ -56,7 +58,4 @@ class MenuCategorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = MenuCategory
-        fields = [
-            "id", "name", "is_active", "created_at", "items"
-        ]
-        # shop field is completely removed – categories are global
+        fields = ["id", "name", "is_active", "created_at", "items"]

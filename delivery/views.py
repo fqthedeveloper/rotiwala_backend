@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+import re
 
 from orders.models import Order
 from shops.models import Shop
@@ -31,6 +32,7 @@ from .services import (
     confirm_delivery, haversine_distance
 )
 from orders.serializers import OrderSerializer
+
 
 # ============================================================
 #  DELIVERY BOY PROFILE VIEWS
@@ -57,9 +59,87 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
             return DeliveryBoyProfileDetailSerializer
         return DeliveryBoyProfileSerializer
 
+    def perform_create(self, serializer):
+        user = self.request.user
+        request_data = self.request.data
+
+        # Get phone and full_name from request
+        phone = request_data.get('phone')
+        full_name = request_data.get('full_name')
+
+        if not phone:
+            raise ValidationError({"phone": "This field is required."})
+        if not full_name:
+            raise ValidationError({"full_name": "This field is required."})
+
+        # Normalize phone (remove spaces, dashes, ensure +91 prefix)
+        phone = re.sub(r'[\s\-]', '', phone)
+        if not phone.startswith('+'):
+            phone = '+91' + phone
+
+        # Get or create user with role delivery_boy
+        try:
+            delivery_user = User.objects.get(phone=phone)
+            # If user exists but not delivery_boy, update role
+            if delivery_user.role != 'delivery_boy':
+                delivery_user.role = 'delivery_boy'
+                delivery_user.save(update_fields=['role'])
+        except User.DoesNotExist:
+            # Create new user with role delivery_boy
+            username = phone.replace('+', '')  # remove + for username
+            # Ensure unique username
+            base_username = username
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}_{counter}"
+                counter += 1
+
+            delivery_user = User(
+                username=username,
+                phone=phone,
+                role='delivery_boy',
+                is_active=True,
+                is_phone_verified=True,
+            )
+            # Set password to phone number (or random)
+            delivery_user.set_password(phone)  # default password = phone number
+            # Parse full name
+            name_parts = full_name.split(' ', 1)
+            delivery_user.first_name = name_parts[0]
+            if len(name_parts) > 1:
+                delivery_user.last_name = name_parts[1]
+            delivery_user.save()
+
+        # Determine shop
+        if user.role == 'manager':
+            shop = user.manager_profile.shop
+            if not shop:
+                raise ValidationError({"shop": "Manager has no shop assigned."})
+        elif user.role == 'super_admin':
+            shop_id = request_data.get('shop')
+            if not shop_id:
+                raise ValidationError({"shop": "This field is required for super_admin."})
+            try:
+                shop = Shop.objects.get(id=shop_id)
+            except Shop.DoesNotExist:
+                raise ValidationError({"shop": "Invalid shop ID."})
+        else:
+            raise ValidationError({"detail": "Not authorized to create delivery boy."})
+
+        # Check if profile already exists for this user
+        if DeliveryBoyProfile.objects.filter(user=delivery_user).exists():
+            raise ValidationError({"phone": "A delivery boy profile already exists for this user."})
+
+        # Create profile
+        serializer.save(
+            user=delivery_user,
+            shop=shop,
+            full_name=full_name,
+            phone=phone,
+        )
+
     @action(detail=True, methods=['post'])
     def toggle_online(self, request, pk=None):
-        """Toggle delivery boy's online status."""
         profile = self.get_object()
         if request.user.role == 'delivery_boy' and profile.user != request.user:
             return Response({'error': 'You can only update your own status.'}, status=status.HTTP_403_FORBIDDEN)
@@ -72,7 +152,6 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def toggle_available(self, request, pk=None):
-        """Toggle delivery boy's availability."""
         profile = self.get_object()
         if request.user.role == 'delivery_boy' and profile.user != request.user:
             return Response({'error': 'You can only update your own status.'}, status=status.HTTP_403_FORBIDDEN)
@@ -108,7 +187,6 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def assign(self, request):
-        """Manual assignment endpoint."""
         order_id = request.data.get('order_id')
         delivery_boy_id = request.data.get('delivery_boy_id')
 
@@ -119,7 +197,6 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
         order = get_object_or_404(Order, id=order_id)
         delivery_boy = get_object_or_404(DeliveryBoyProfile, id=delivery_boy_id)
 
-        # Check permissions
         user = request.user
         if user.role == 'manager':
             if user.manager_profile.shop != order.shop:
@@ -139,7 +216,6 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def auto_assign(self, request):
-        """Automatic assignment endpoint."""
         order_id = request.data.get('order_id')
 
         if not order_id:
@@ -163,7 +239,6 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):
-        """Delivery boy accepts assignment."""
         assignment = self.get_object()
         if request.user.role != 'delivery_boy':
             return Response({'error': 'Only delivery boys can accept assignments.'},
@@ -186,7 +261,6 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def pickup(self, request, pk=None):
-        """Confirm pickup after QR scan."""
         assignment = self.get_object()
         if request.user.role != 'delivery_boy':
             return Response({'error': 'Only delivery boys can confirm pickup.'},
@@ -202,7 +276,6 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def out_for_delivery(self, request, pk=None):
-        """Mark as out for delivery."""
         assignment = self.get_object()
         if request.user.role != 'delivery_boy':
             return Response({'error': 'Only delivery boys can update status.'},
@@ -218,7 +291,6 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def deliver(self, request, pk=None):
-        """Confirm delivery completion."""
         assignment = self.get_object()
         if request.user.role != 'delivery_boy':
             return Response({'error': 'Only delivery boys can confirm delivery.'},
@@ -258,7 +330,6 @@ class ParcelViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def scan(self, request):
-        """QR scan endpoint."""
         qr_token = request.data.get('qr_token')
         if not qr_token:
             return Response({'error': 'qr_token is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -308,7 +379,6 @@ class DeliveryLocationViewSet(viewsets.ModelViewSet):
         return DeliveryLocation.objects.none()
 
     def create(self, request, *args, **kwargs):
-        """Create a GPS location update."""
         if request.user.role != 'delivery_boy':
             return Response({'error': 'Only delivery boys can update location.'},
                             status=status.HTTP_403_FORBIDDEN)
@@ -322,10 +392,8 @@ class DeliveryLocationViewSet(viewsets.ModelViewSet):
             return Response({'error': 'latitude and longitude are required.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # Update delivery boy's current location
         delivery_boy.update_location(latitude, longitude)
 
-        # Create history record
         location = DeliveryLocation.objects.create(
             delivery_boy=delivery_boy,
             assignment=request.data.get('assignment'),
@@ -358,11 +426,9 @@ class DeliveryStatisticsView(generics.GenericAPIView):
         else:
             return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
-        # Business day "today"
         from .models import get_business_date
         today = get_business_date()
 
-        # Aggregate statistics
         total_completed = assignments.count()
         total_distance = sum(float(a.estimated_distance_km or 0) for a in assignments)
 
@@ -370,21 +436,17 @@ class DeliveryStatisticsView(generics.GenericAPIView):
         today_completed = today_assignments.count()
         today_distance = sum(float(a.estimated_distance_km or 0) for a in today_assignments)
 
-        # Weekly (last 7 days)
         week_ago = timezone.now() - timezone.timedelta(days=7)
         week_assignments = assignments.filter(delivered_at__gte=week_ago)
         week_completed = week_assignments.count()
         week_distance = sum(float(a.estimated_distance_km or 0) for a in week_assignments)
 
-        # Monthly (last 30 days)
         month_ago = timezone.now() - timezone.timedelta(days=30)
         month_assignments = assignments.filter(delivered_at__gte=month_ago)
         month_completed = month_assignments.count()
         month_distance = sum(float(a.estimated_distance_km or 0) for a in month_assignments)
 
-        # Average
         avg_distance = total_distance / total_completed if total_completed > 0 else 0
-        avg_time = None  # Could calculate from assigned_at to delivered_at
 
         data = {
             'total': {
@@ -432,7 +494,6 @@ class DeliveryDashboardView(generics.GenericAPIView):
         else:
             return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
-        # Active deliveries
         active = []
         for assignment in assignments:
             active.append({
@@ -455,17 +516,19 @@ class DeliveryDashboardView(generics.GenericAPIView):
             'active_deliveries': active,
             'online_boys': DeliveryBoyProfileSerializer(boys, many=True).data,
         })
-        
+
+
+# ============================================================
+#  READY ORDERS FOR DELIVERY
+# ============================================================
+
 class ReadyOrdersForDeliveryView(generics.ListAPIView):
-    """
-    List orders that are ready and have delivery option, not yet assigned.
-    """
     permission_classes = [IsAuthenticated, IsManagerOrSuperAdmin]
-    serializer_class = OrderSerializer  # or a custom serializer
+    serializer_class = OrderSerializer
 
     def get_queryset(self):
         user = self.request.user
-        
+
         if user.role == 'manager':
             shop = user.manager_profile.shop
         elif user.role == 'super_admin':
@@ -477,7 +540,6 @@ class ReadyOrdersForDeliveryView(generics.ListAPIView):
         if not shop:
             return Order.objects.none()
 
-        # Get orders that are ready, delivery, and have no active assignment
         return Order.objects.filter(
             shop=shop,
             status='ready',

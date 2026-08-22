@@ -1,9 +1,6 @@
 # delivery/serializers.py
 
 from rest_framework import serializers
-from accounts.serializers import UserSerializer
-from shops.serializers import ShopSerializer
-from orders.serializers import OrderSerializer
 from .models import (
     DeliveryBoyProfile, DeliveryAssignment, Parcel,
     DeliveryLocation, WalkInTokenCounter
@@ -11,29 +8,37 @@ from .models import (
 
 
 class DeliveryBoyProfileSerializer(serializers.ModelSerializer):
+    # These are read-only fields from the User model
     user_id = serializers.IntegerField(source='user.id', read_only=True)
     user_phone = serializers.CharField(source='user.phone', read_only=True)
+    
+    # Shop info
+    shop = serializers.PrimaryKeyRelatedField(read_only=True)
     shop_name = serializers.CharField(source='shop.name', read_only=True)
+    
+    # Current assignment (computed)
+    current_assignment = serializers.SerializerMethodField()
 
     class Meta:
         model = DeliveryBoyProfile
         fields = [
-            'id', 'user', 'user_id', 'user_phone', 'shop', 'shop_name',
-            'full_name', 'phone', 'photo',
+            'id', 'user', 'user_id', 'user_phone',
+            'shop', 'shop_name',
+            'full_name',       # ← Now included in response
+            'phone',           # ← Now included in response
+            'photo',
             'is_online', 'is_available',
             'current_latitude', 'current_longitude', 'last_location_at',
             'total_deliveries', 'total_distance_km',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
+            'current_assignment'
         ]
-        read_only_fields = ['total_deliveries', 'total_distance_km', 'created_at', 'updated_at']
-
-
-class DeliveryBoyProfileDetailSerializer(DeliveryBoyProfileSerializer):
-    """Extended with current assignment info."""
-    current_assignment = serializers.SerializerMethodField()
-
-    class Meta(DeliveryBoyProfileSerializer.Meta):
-        fields = DeliveryBoyProfileSerializer.Meta.fields + ['current_assignment']
+        read_only_fields = [
+            'total_deliveries', 'total_distance_km', 'created_at', 'updated_at',
+            'is_online', 'is_available',
+            'current_latitude', 'current_longitude', 'last_location_at',
+            'user', 'user_id', 'user_phone', 'shop', 'shop_name',
+        ]
 
     def get_current_assignment(self, obj):
         assignment = DeliveryAssignment.objects.filter(
@@ -41,8 +46,18 @@ class DeliveryBoyProfileDetailSerializer(DeliveryBoyProfileSerializer):
             status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
         ).first()
         if assignment:
-            return DeliveryAssignmentSerializer(assignment).data
+            return {
+                'id': assignment.id,
+                'order_number': assignment.order.order_number,
+                'status': assignment.status,
+                'customer_name': assignment.order.customer_name,
+            }
         return None
+
+
+class DeliveryBoyProfileDetailSerializer(DeliveryBoyProfileSerializer):
+    """Extended with more details if needed."""
+    pass
 
 
 class ParcelSerializer(serializers.ModelSerializer):

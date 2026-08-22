@@ -1,3 +1,5 @@
+# menu/views.py
+
 from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -22,15 +24,11 @@ class PublicCategoryListView(generics.ListAPIView):
 
 
 class PublicShopCategoryView(generics.ListAPIView):
-    """
-    (Legacy) Originally filtered categories by shop.
-    Since categories are now global, we ignore the shop_id and return all active categories.
-    """
+    """List all active categories (legacy - ignores shop_id)."""
     serializer_class = MenuCategorySerializer
     permission_classes = [AllowAny]
 
     def get_queryset(self):
-        # shop_id = self.kwargs["shop_id"]  # no longer used
         return MenuCategory.objects.filter(is_active=True)
 
 
@@ -42,12 +40,10 @@ class PublicMenuItemListView(generics.ListAPIView):
     def get_queryset(self):
         queryset = MenuItem.objects.filter(is_available=True)
         
-        # Filter by category (optional)
         category_id = self.request.GET.get("category")
         if category_id:
             queryset = queryset.filter(category_id=category_id)
         
-        # NEW: Filter by shop (optional) – required for home page shop selection
         shop_id = self.request.GET.get("shop")
         if shop_id:
             queryset = queryset.filter(shop_id=shop_id)
@@ -76,20 +72,8 @@ class PublicCategoryItemsView(generics.ListAPIView):
 # ADMIN / MANAGER VIEWS
 # ============================================
 
-class CategoryListView(generics.ListAPIView):
-    """List all active categories (authenticated)."""
-    serializer_class = MenuCategorySerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return MenuCategory.objects.filter(is_active=True)
-
-
 class CategoryListCreateView(generics.ListCreateAPIView):
-    """
-    Categories are global – no shop assignment.
-    All authenticated users can view and create categories.
-    """
+    """Categories are global – all authenticated users can view and create."""
     serializer_class = MenuCategorySerializer
     permission_classes = [IsAuthenticated]
 
@@ -97,7 +81,6 @@ class CategoryListCreateView(generics.ListCreateAPIView):
         return MenuCategory.objects.all()
 
     def perform_create(self, serializer):
-        # No shop field – just save the category
         serializer.save()
 
 
@@ -107,16 +90,6 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
     queryset = MenuCategory.objects.all()
-
-
-class MenuItemListView(generics.ListAPIView):
-    """List menu items for a specific category (authenticated)."""
-    serializer_class = MenuItemSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        category_id = self.kwargs["category_id"]
-        return MenuItem.objects.filter(category_id=category_id, is_available=True)
 
 
 class MenuItemListCreateView(generics.ListCreateAPIView):
@@ -146,7 +119,6 @@ class MenuItemListCreateView(generics.ListCreateAPIView):
 
         if user.role == "manager":
             serializer.save(shop=user.manager_profile.shop)
-
         elif user.role == "super_admin":
             shop_id = self.request.data.get('shop')
             if not shop_id:
@@ -156,7 +128,6 @@ class MenuItemListCreateView(generics.ListCreateAPIView):
             except Shop.DoesNotExist:
                 raise DRFValidationError({"shop": "Invalid shop ID."})
             serializer.save(shop=shop)
-
         else:
             raise DRFValidationError({"detail": "Not authorized."})
 
