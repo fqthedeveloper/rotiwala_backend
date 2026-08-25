@@ -30,10 +30,7 @@ class ManagerProfileSerializer(
         ]
 
 
-class ShopSerializer(
-    serializers.ModelSerializer
-):
-
+class ShopSerializer(serializers.ModelSerializer):
     manager = serializers.SerializerMethodField()
 
     class Meta:
@@ -41,13 +38,8 @@ class ShopSerializer(
         fields = "__all__"
 
     def get_manager(self, obj):
-
         try:
             profile = obj.manager
-
-            return ManagerProfileSerializer(
-                profile
-            ).data
-
+            return ManagerProfileSerializer(profile).data
         except:
             return None

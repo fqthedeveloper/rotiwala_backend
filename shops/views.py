@@ -2,9 +2,9 @@
 
 from rest_framework import generics, status
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
 from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser  # <-- ADD JSONParser
 
 from accounts.permissions import IsSuperAdmin, CanReadOwnShop
 from accounts.models import User, ManagerProfile
@@ -20,25 +20,55 @@ class PublicShopListView(generics.ListAPIView):
 
 
 class ShopListCreateView(generics.ListCreateAPIView):
-    """
-    Only super admin can list all shops and create new shops.
-    """
+    """Only super admin can list all shops and create new shops."""
     queryset = Shop.objects.all()
     serializer_class = ShopSerializer
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser] # Add JSONParser here too for consistency
     permission_classes = [IsAuthenticated, IsSuperAdmin]
 
 
 class ShopDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     - Super admin: full access (GET, PUT, PATCH, DELETE).
-    - Manager: can only GET their own shop.
+    - Manager: can GET, PUT, PATCH their own shop (to change settings like delivery_assignment_mode),
+      but cannot DELETE.
     """
     queryset = Shop.objects.all()
     serializer_class = ShopSerializer
-    parser_classes = [MultiPartParser, FormParser]
-    permission_classes = [IsAuthenticated, CanReadOwnShop]
+    # ADD JSONParser here so it accepts both JSON and multipart/form-data
+    parser_classes = [MultiPartParser, FormParser, JSONParser] 
 
+    def get_permissions(self):
+        """
+        Dynamically set permissions based on HTTP method.
+        - GET, PUT, PATCH: Allow managers to update their own shop
+        - DELETE: Only super admin
+        """
+        if self.request.method in ['GET', 'PUT', 'PATCH']:
+            return [IsAuthenticated(), CanReadOwnShop()]
+        elif self.request.method == 'DELETE':
+            return [IsAuthenticated(), IsSuperAdmin()]
+        return super().get_permissions()
+
+    def perform_update(self, serializer):
+        """
+        Extra safety check: Ensure manager can only update their own shop.
+        """
+        user = self.request.user
+        if user.role == 'manager':
+            try:
+                if user.manager_profile.shop != self.get_object():
+                    return Response({'error': 'You can only update your own shop.'},
+                                    status=status.HTTP_403_FORBIDDEN)
+            except:
+                return Response({'error': 'Manager profile not found.'},
+                                status=status.HTTP_403_FORBIDDEN)
+        serializer.save()
+
+
+# ============================================================
+#  BELOW ARE YOUR OTHER VIEWS (No changes needed)
+# ============================================================
 
 class AssignManagerView(APIView):
     permission_classes = [IsAuthenticated, IsSuperAdmin]
@@ -75,9 +105,7 @@ class RemoveManagerView(APIView):
 
 
 class MyShopView(APIView):
-    """
-    Returns the shop assigned to the currently logged‑in manager.
-    """
+    """Returns the shop assigned to the currently logged‑in manager."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

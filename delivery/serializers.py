@@ -1,62 +1,57 @@
 # delivery/serializers.py
 
 from rest_framework import serializers
-from .models import (
-    DeliveryBoyProfile, DeliveryAssignment, Parcel,
-    DeliveryLocation, WalkInTokenCounter
-)
+from .models import DeliveryBoyProfile, DeliveryAssignment, Parcel, DeliveryLocation, WalkInTokenCounter
 
 
 class DeliveryBoyProfileSerializer(serializers.ModelSerializer):
-    # These are read-only fields from the User model
     user_id = serializers.IntegerField(source='user.id', read_only=True)
     user_phone = serializers.CharField(source='user.phone', read_only=True)
-    
-    # Shop info
     shop = serializers.PrimaryKeyRelatedField(read_only=True)
     shop_name = serializers.CharField(source='shop.name', read_only=True)
-    
-    # Current assignment (computed)
-    current_assignment = serializers.SerializerMethodField()
+
+    # NEW - Return list of current assignments
+    current_assignments = serializers.SerializerMethodField()
+    active_order_count = serializers.IntegerField(read_only=True)
+    has_capacity = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = DeliveryBoyProfile
         fields = [
             'id', 'user', 'user_id', 'user_phone',
             'shop', 'shop_name',
-            'full_name',       # ← Now included in response
-            'phone',           # ← Now included in response
-            'photo',
-            'is_online', 'is_available',
+            'full_name', 'phone', 'photo',
+            'is_online', 'is_available', 'max_active_orders',
+            'active_order_count', 'has_capacity',
             'current_latitude', 'current_longitude', 'last_location_at',
             'total_deliveries', 'total_distance_km',
             'created_at', 'updated_at',
-            'current_assignment'
+            'current_assignments'  # <-- changed from current_assignment
         ]
         read_only_fields = [
             'total_deliveries', 'total_distance_km', 'created_at', 'updated_at',
-            'is_online', 'is_available',
+            'is_online', 'is_available', 'active_order_count', 'has_capacity',
             'current_latitude', 'current_longitude', 'last_location_at',
             'user', 'user_id', 'user_phone', 'shop', 'shop_name',
         ]
 
-    def get_current_assignment(self, obj):
-        assignment = DeliveryAssignment.objects.filter(
+    def get_current_assignments(self, obj):
+        assignments = DeliveryAssignment.objects.filter(
             delivery_boy=obj,
             status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
-        ).first()
-        if assignment:
-            return {
-                'id': assignment.id,
-                'order_number': assignment.order.order_number,
-                'status': assignment.status,
-                'customer_name': assignment.order.customer_name,
-            }
-        return None
+        )
+        return [
+            {
+                'id': a.id,
+                'order_id': a.order_id, # <-- Ensure this is here
+                'order_number': a.order.order_number,
+                'status': a.status,
+                'customer_name': a.order.customer_name,
+            } for a in assignments
+        ]
 
 
 class DeliveryBoyProfileDetailSerializer(DeliveryBoyProfileSerializer):
-    """Extended with more details if needed."""
     pass
 
 

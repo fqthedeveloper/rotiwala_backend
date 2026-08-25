@@ -1,12 +1,11 @@
 # delivery/urls.py
-
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     DeliveryBoyProfileViewSet, DeliveryAssignmentViewSet,
     ParcelViewSet, DeliveryLocationViewSet,
     DeliveryStatisticsView, DeliveryDashboardView,
-    ReadyOrdersForDeliveryView
+    ReadyOrdersForDeliveryView, OrderTrackingView
 )
 
 router = DefaultRouter()
@@ -20,4 +19,5 @@ urlpatterns = [
     path('statistics/', DeliveryStatisticsView.as_view(), name='delivery-statistics'),
     path('dashboard/', DeliveryDashboardView.as_view(), name='delivery-dashboard'),
     path('orders/ready/', ReadyOrdersForDeliveryView.as_view(), name='ready-orders'),
+    path('tracking/<int:order_id>/', OrderTrackingView.as_view(), name='order-tracking'),
 ]

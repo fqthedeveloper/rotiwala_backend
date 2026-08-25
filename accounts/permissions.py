@@ -1,4 +1,4 @@
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 
 class IsSuperAdmin(BasePermission):
@@ -65,27 +65,26 @@ class IsSuperAdminOrManagerOrSelf(BasePermission):
 
 class CanReadOwnShop(BasePermission):
     """
-    Custom permission:
-    - Super admin: full access (GET, PUT, PATCH, DELETE)
-    - Manager: can only retrieve (GET) their own shop
+    - Super admin: full access (GET, POST, PUT, PATCH, DELETE)
+    - Manager: can read and update (GET, PUT, PATCH) their own shop
+    - Others: no access
     """
     def has_permission(self, request, view):
-        return request.user.is_authenticated
+        if not request.user.is_authenticated:
+            return False
+        if request.user.role == 'super_admin':
+            return True
+        if request.user.role == 'manager':
+            return hasattr(request.user, 'manager_profile') and request.user.manager_profile.shop is not None
+        return False
 
     def has_object_permission(self, request, view, obj):
-        user = request.user
-        # Super admin can do anything
-        if user.role == 'super_admin':
+        if request.user.role == 'super_admin':
             return True
-        # Manager: allow only safe methods (GET, HEAD, OPTIONS)
-        if user.role == 'manager':
-            if request.method in ('GET', 'HEAD', 'OPTIONS'):
-                try:
-                    profile = user.manager_profile
-                    # Check if this shop belongs to the manager
-                    return profile.shop and profile.shop.id == obj.id
-                except:
-                    return False
-            return False
-        # Any other role: no access
+        if request.user.role == 'manager':
+            # Managers can read AND update their own shop
+            try:
+                return request.user.manager_profile.shop == obj
+            except:
+                return False
         return False

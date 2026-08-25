@@ -10,80 +10,44 @@ from orders.models import Order
 from .models import DeliveryBoyProfile, DeliveryAssignment, Parcel, get_business_date
 
 
-# ============================================================
-#  DISTANCE CALCULATION (Haversine)
-# ============================================================
-
 def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    Calculate the great-circle distance between two points
-    in kilometers using the Haversine formula.
-    """
-    R = 6371  # Earth's radius in kilometers
-
+    """Calculate distance in km."""
+    R = 6371
     lat1, lon1, lat2, lon2 = map(float, [lat1, lon1, lat2, lon2])
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-
     a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     c = 2 * math.asin(math.sqrt(a))
-
     return Decimal(str(R * c))
 
 
 def validate_delivery_location(shop, customer_lat, customer_lon):
-    """
-    Validate that the customer location is within the shop's delivery radius.
-    Raises ValidationError if outside.
-    """
     if not shop.latitude or not shop.longitude:
         raise ValidationError("Shop location is not configured.")
-
-    distance = haversine_distance(
-        shop.latitude, shop.longitude,
-        customer_lat, customer_lon
-    )
-
+    distance = haversine_distance(shop.latitude, shop.longitude, customer_lat, customer_lon)
     if distance > shop.delivery_radius_km:
         raise ValidationError(
             f"Delivery is not available at this location. "
             f"Maximum distance is {shop.delivery_radius_km} km, "
             f"your location is {distance:.2f} km away."
         )
-
     return distance
 
 
-# ============================================================
-#  PARCEL CREATION
-# ============================================================
-
 def create_parcel_for_order(order):
-    """
-    Create a Parcel when a delivery order becomes READY.
-    """
     if order.delivery_option != 'delivery':
         return None
-
     if hasattr(order, 'parcel'):
-        return order.parcel  # Already exists
-
-    parcel = Parcel.objects.create(
-        order=order,
-        shop=order.shop,
-        status='created'
-    )
+        return order.parcel
+    parcel = Parcel.objects.create(order=order, shop=order.shop, status='created')
     return parcel
 
 
 # ============================================================
-#  MANUAL ASSIGNMENT
+#  MANUAL ASSIGNMENT (allowing multiple orders per boy)
 # ============================================================
 
 def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None):
-    """
-    Manually assign a delivery boy to an order.
-    """
     if order.delivery_option != 'delivery':
         raise ValidationError("This order is not a delivery order.")
 
@@ -97,22 +61,26 @@ def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None):
     if parcel.status in ('picked_up', 'out_for_delivery', 'delivered'):
         raise ValidationError(f"Parcel is already {parcel.status}.")
 
-    # Check delivery boy belongs to the same shop
     if delivery_boy_profile.shop != order.shop:
         raise ValidationError("Delivery boy does not belong to this shop.")
 
-    if not delivery_boy_profile.is_online or not delivery_boy_profile.is_available:
-        raise ValidationError("Delivery boy is not available.")
+    # Check if boy has capacity
+    if not delivery_boy_profile.has_capacity:
+        raise ValidationError(f"Delivery boy already has {delivery_boy_profile.active_order_count} active orders (max {delivery_boy_profile.max_active_orders}).")
+
+    # Boy must be online
+    if not delivery_boy_profile.is_online:
+        raise ValidationError("Delivery boy is offline.")
 
     with transaction.atomic():
-        # Close any existing assignment for this order
+        # Close existing assignment for this order (if any)
         existing = DeliveryAssignment.objects.filter(order=order, status__in=['assigned', 'accepted']).first()
         if existing:
             existing.status = 'reassigned'
             existing.save(update_fields=['status'])
 
         # Calculate estimated distance
-        if order.delivery_latitude and order.delivery_longitude:
+        if order.delivery_latitude and order.delivery_longitude and order.shop.latitude and order.shop.longitude:
             estimated_distance = haversine_distance(
                 order.shop.latitude, order.shop.longitude,
                 order.delivery_latitude, order.delivery_longitude
@@ -136,9 +104,11 @@ def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None):
         parcel.status = 'assigned'
         parcel.save(update_fields=['status'])
 
-        # Update delivery boy availability (optional: mark busy)
-        delivery_boy_profile.is_available = False
-        delivery_boy_profile.save(update_fields=['is_available'])
+        # DON'T set is_available = False. Keep boy available until capacity is reached.
+        # Optionally, update availability based on capacity
+        if not delivery_boy_profile.has_capacity:
+            delivery_boy_profile.is_available = False
+            delivery_boy_profile.save(update_fields=['is_available'])
 
     return assignment
 
@@ -148,37 +118,27 @@ def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None):
 # ============================================================
 
 def find_best_delivery_boy(order):
-    """
-    Find the best available delivery boy for automatic assignment.
-    Uses a combination of:
-      - Nearest distance to shop/customer
-      - Lowest active workload
-    """
     shop = order.shop
 
-    # Get all online & available delivery boys for this shop
+    # Get online boys with capacity
     candidates = DeliveryBoyProfile.objects.filter(
         shop=shop,
         is_online=True,
-        is_available=True
+    ).exclude(
+        # Exclude those who are at max capacity
+        id__in=[
+            boy.id for boy in DeliveryBoyProfile.objects.filter(shop=shop, is_online=True)
+            if boy.active_order_count >= boy.max_active_orders
+        ]
     )
 
     if not candidates.exists():
         return None
 
-    # Get active assignment count for each candidate
-    active_assignments = {}
-    for boy in candidates:
-        active_count = DeliveryAssignment.objects.filter(
-            delivery_boy=boy,
-            status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
-        ).count()
-        active_assignments[boy.id] = active_count
-
-    # Score each candidate: lower score is better
+    # Score each candidate
     scored = []
     for boy in candidates:
-        # Distance from shop to delivery boy (if boy has location)
+        # Distance from shop to boy
         if boy.current_latitude and boy.current_longitude and shop.latitude and shop.longitude:
             distance_to_shop = haversine_distance(
                 shop.latitude, shop.longitude,
@@ -187,7 +147,7 @@ def find_best_delivery_boy(order):
         else:
             distance_to_shop = Decimal('999')
 
-        # Distance from boy to customer (if order has delivery location)
+        # Distance from boy to customer
         if order.delivery_latitude and order.delivery_longitude and boy.current_latitude and boy.current_longitude:
             distance_to_customer = haversine_distance(
                 boy.current_latitude, boy.current_longitude,
@@ -196,29 +156,24 @@ def find_best_delivery_boy(order):
         else:
             distance_to_customer = Decimal('999')
 
-        # Score: weighted combination
-        # Prefer lower active count, then shorter distance
-        active_weight = Decimal(str(active_assignments[boy.id])) * Decimal('2')
+        # Score: lower active count + shorter distance
+        active_weight = Decimal(str(boy.active_order_count)) * Decimal('2')
         distance_weight = distance_to_shop + distance_to_customer
         score = active_weight + distance_weight
 
         scored.append({
             'boy': boy,
             'score': score,
-            'active_count': active_assignments[boy.id],
+            'active_count': boy.active_order_count,
             'distance_to_shop': distance_to_shop,
             'distance_to_customer': distance_to_customer,
         })
 
-    # Sort by score ascending
     scored.sort(key=lambda x: x['score'])
     return scored[0]['boy'] if scored else None
 
 
 def auto_assign_delivery(order):
-    """
-    Automatically assign the best available delivery boy to an order.
-    """
     if order.delivery_option != 'delivery':
         raise ValidationError("This order is not a delivery order.")
 
@@ -243,16 +198,11 @@ def auto_assign_delivery(order):
 # ============================================================
 
 def scan_parcel(qr_token, delivery_boy_profile):
-    """
-    Process a QR scan by a delivery boy.
-    Validates the parcel and returns its details.
-    """
     try:
         parcel = Parcel.objects.select_for_update().get(qr_token=qr_token)
     except Parcel.DoesNotExist:
         raise ValidationError("Invalid QR code.")
 
-    # Validation checks
     if parcel.shop != delivery_boy_profile.shop:
         raise ValidationError("This parcel does not belong to your shop.")
 
@@ -265,7 +215,6 @@ def scan_parcel(qr_token, delivery_boy_profile):
     if parcel.order.status != 'ready':
         raise ValidationError(f"Order is not ready for pickup. Status: {parcel.order.status}")
 
-    # Check if there's an assignment for this parcel
     try:
         assignment = DeliveryAssignment.objects.get(parcel=parcel, status='assigned')
         if assignment.delivery_boy != delivery_boy_profile:
@@ -273,7 +222,6 @@ def scan_parcel(qr_token, delivery_boy_profile):
     except DeliveryAssignment.DoesNotExist:
         raise ValidationError("This parcel has not been assigned to anyone.")
 
-    # Mark as scanned
     parcel.scanned_at = timezone.now()
     parcel.save(update_fields=['scanned_at'])
 
@@ -281,10 +229,6 @@ def scan_parcel(qr_token, delivery_boy_profile):
 
 
 def confirm_pickup(assignment, delivery_boy_profile):
-    """
-    Confirm pickup after QR scan.
-    Transitions: ASSIGNED → PICKED_UP → OUT_FOR_DELIVERY
-    """
     if assignment.delivery_boy != delivery_boy_profile:
         raise ValidationError("You are not assigned to this delivery.")
 
@@ -292,32 +236,19 @@ def confirm_pickup(assignment, delivery_boy_profile):
         raise ValidationError(f"Cannot pickup. Current status: {assignment.status}")
 
     with transaction.atomic():
-        # Update assignment
         assignment.status = 'picked_up'
         assignment.picked_up_at = timezone.now()
         assignment.save(update_fields=['status', 'picked_up_at'])
 
-        # Update parcel
         parcel = assignment.parcel
         parcel.status = 'picked_up'
         parcel.picked_up_at = timezone.now()
         parcel.save(update_fields=['status', 'picked_up_at'])
 
-        # Update order status
-        order = assignment.order
-        order.status = 'preparing'  # or keep 'ready'? According to spec, it should become OUT_FOR_DELIVERY
-        # Actually, spec says: READY → DELIVERY_ASSIGNED → PICKED_UP → OUT_FOR_DELIVERY
-        # We'll keep order status as 'ready' until delivery is confirmed.
-        # But we can add a custom status or use the assignment status.
-        # For now, leave order as 'ready'.
-
     return assignment
 
 
 def confirm_out_for_delivery(assignment, delivery_boy_profile):
-    """
-    Mark assignment as OUT_FOR_DELIVERY.
-    """
     if assignment.delivery_boy != delivery_boy_profile:
         raise ValidationError("You are not assigned to this delivery.")
 
@@ -341,9 +272,6 @@ def confirm_out_for_delivery(assignment, delivery_boy_profile):
 # ============================================================
 
 def confirm_delivery(assignment, delivery_boy_profile):
-    """
-    Confirm that the delivery is complete.
-    """
     if assignment.delivery_boy != delivery_boy_profile:
         raise ValidationError("You are not assigned to this delivery.")
 
@@ -351,33 +279,29 @@ def confirm_delivery(assignment, delivery_boy_profile):
         raise ValidationError(f"Cannot confirm delivery. Current status: {assignment.status}")
 
     with transaction.atomic():
-        # Update assignment
         assignment.status = 'delivered'
         assignment.delivered_at = timezone.now()
         assignment.save(update_fields=['status', 'delivered_at'])
 
-        # Update parcel
         parcel = assignment.parcel
         parcel.status = 'delivered'
         parcel.delivered_at = timezone.now()
         parcel.save(update_fields=['status', 'delivered_at'])
 
-        # Update order
         order = assignment.order
-        order.status = 'collected'  # or a new 'delivered' status
+        order.status = 'collected'
         order.save(update_fields=['status'])
 
-        # Update delivery boy statistics
         boy = assignment.delivery_boy
         boy.total_deliveries += 1
         if assignment.estimated_distance_km:
             boy.total_distance_km += assignment.estimated_distance_km
-        boy.is_available = True
-        boy.save(update_fields=['total_deliveries', 'total_distance_km', 'is_available'])
 
-        # TODO: Calculate actual distance from GPS history
-        # actual_distance = calculate_actual_distance(assignment)
-        # assignment.actual_distance_km = actual_distance
-        # assignment.save(update_fields=['actual_distance_km'])
+        # Recalculate availability based on capacity
+        if not boy.has_capacity:
+            boy.is_available = False
+        else:
+            boy.is_available = True
+        boy.save(update_fields=['total_deliveries', 'total_distance_km', 'is_available'])
 
     return assignment

@@ -7,6 +7,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.core.exceptions import ValidationError
+from rest_framework.generics import RetrieveAPIView
 from django.utils import timezone
 import re
 
@@ -63,31 +64,24 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
         user = self.request.user
         request_data = self.request.data
 
-        # Get phone and full_name from request
         phone = request_data.get('phone')
         full_name = request_data.get('full_name')
+        max_active_orders = request_data.get('max_active_orders', 3)
 
-        if not phone:
-            raise ValidationError({"phone": "This field is required."})
-        if not full_name:
-            raise ValidationError({"full_name": "This field is required."})
+        if not phone or not full_name:
+            raise ValidationError({"phone": "This field is required."} if not phone else {"full_name": "This field is required."})
 
-        # Normalize phone (remove spaces, dashes, ensure +91 prefix)
         phone = re.sub(r'[\s\-]', '', phone)
         if not phone.startswith('+'):
             phone = '+91' + phone
 
-        # Get or create user with role delivery_boy
         try:
             delivery_user = User.objects.get(phone=phone)
-            # If user exists but not delivery_boy, update role
             if delivery_user.role != 'delivery_boy':
                 delivery_user.role = 'delivery_boy'
                 delivery_user.save(update_fields=['role'])
         except User.DoesNotExist:
-            # Create new user with role delivery_boy
-            username = phone.replace('+', '')  # remove + for username
-            # Ensure unique username
+            username = phone.replace('+', '')
             base_username = username
             counter = 1
             while User.objects.filter(username=username).exists():
@@ -101,16 +95,13 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
                 is_active=True,
                 is_phone_verified=True,
             )
-            # Set password to phone number (or random)
-            delivery_user.set_password(phone)  # default password = phone number
-            # Parse full name
+            delivery_user.set_password(phone)
             name_parts = full_name.split(' ', 1)
             delivery_user.first_name = name_parts[0]
             if len(name_parts) > 1:
                 delivery_user.last_name = name_parts[1]
             delivery_user.save()
 
-        # Determine shop
         if user.role == 'manager':
             shop = user.manager_profile.shop
             if not shop:
@@ -126,16 +117,15 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
         else:
             raise ValidationError({"detail": "Not authorized to create delivery boy."})
 
-        # Check if profile already exists for this user
         if DeliveryBoyProfile.objects.filter(user=delivery_user).exists():
             raise ValidationError({"phone": "A delivery boy profile already exists for this user."})
 
-        # Create profile
         serializer.save(
             user=delivery_user,
             shop=shop,
             full_name=full_name,
             phone=phone,
+            max_active_orders=max_active_orders,
         )
 
     @action(detail=True, methods=['post'])
@@ -147,6 +137,9 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
         profile.is_online = not profile.is_online
         if not profile.is_online:
             profile.is_available = False
+        else:
+            # When going online, set available if has capacity
+            profile.is_available = profile.has_capacity
         profile.save(update_fields=['is_online', 'is_available'])
         return Response(DeliveryBoyProfileSerializer(profile).data)
 
@@ -158,6 +151,10 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
 
         if not profile.is_online:
             return Response({'error': 'Cannot set available while offline.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # If trying to set available but already at capacity, prevent it
+        if not profile.is_available and not profile.has_capacity:
+            return Response({'error': 'Cannot set available. Delivery boy is at max active orders.'}, status=status.HTTP_400_BAD_REQUEST)
 
         profile.is_available = not profile.is_available
         profile.save(update_fields=['is_available'])
@@ -547,3 +544,44 @@ class ReadyOrdersForDeliveryView(generics.ListAPIView):
         ).exclude(
             delivery_assignment__status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
         ).select_related('shop')
+        
+        
+class OrderTrackingView(RetrieveAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_id):
+        try:
+            assignment = DeliveryAssignment.objects.get(
+                order_id=order_id,
+                status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery', 'delivered']
+            )
+        except DeliveryAssignment.DoesNotExist:
+            return Response({'error': 'No active delivery assignment for this order.'}, status=404)
+
+        boy = assignment.delivery_boy
+        order = assignment.order
+
+        data = {
+            'order_id': order.id,
+            'order_number': order.order_number,
+            'status': assignment.status,
+            'delivery_boy': {
+                'id': boy.id,
+                'full_name': boy.full_name,
+                'phone': boy.phone,
+                'latitude': str(boy.current_latitude) if boy.current_latitude else None,
+                'longitude': str(boy.current_longitude) if boy.current_longitude else None,
+                'last_location_at': boy.last_location_at,
+            },
+            'shop': {
+                'latitude': str(order.shop.latitude) if order.shop.latitude else None,
+                'longitude': str(order.shop.longitude) if order.shop.longitude else None,
+                'name': order.shop.name,
+            },
+            'customer_location': {
+                'latitude': str(order.delivery_latitude) if order.delivery_latitude else None,
+                'longitude': str(order.delivery_longitude) if order.delivery_longitude else None,
+                'address': order.delivery_address,
+            },
+        }
+        return Response(data)
