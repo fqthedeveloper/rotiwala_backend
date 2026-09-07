@@ -4,13 +4,17 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
 from rest_framework.response import Response
+from django.utils import timezone
+from django.utils.dateparse import parse_date
+from django.db import transaction
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser  # <-- ADD JSONParser
 
 from accounts.permissions import IsSuperAdmin, CanReadOwnShop
 from accounts.models import User, ManagerProfile
 from geopy.distance import geodesic
-from .models import Shop
+from .models import Shop, ShopOrderCapacityAudit
 from .serializers import ShopSerializer
+from .services import get_order_capacity_snapshot
 
 
 class PublicShopListView(generics.ListAPIView):
@@ -119,6 +123,107 @@ class MyShopView(APIView):
             return Response(serializer.data)
         except:
             return Response({"error": "Profile not found"}, status=404)
+
+
+def _manager_shop(request):
+    if request.user.role == "manager":
+        return getattr(getattr(request.user, "manager_profile", None), "shop", None)
+    if request.user.role == "super_admin":
+        shop_id = request.query_params.get("shop_id") or request.data.get("shop_id")
+        return Shop.objects.filter(id=shop_id).first() if shop_id else Shop.objects.first()
+    return None
+
+
+class OnlineOrderStatusView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        shop_id = request.query_params.get("shop_id")
+        shop = Shop.objects.filter(id=shop_id, is_active=True).first()
+        if not shop:
+            return Response({"error": "Shop not found"}, status=status.HTTP_404_NOT_FOUND)
+        requested_date = parse_date(request.query_params.get("date", ""))
+        snapshot = get_order_capacity_snapshot(shop, requested_date)
+        return Response({
+            "accepting_online_orders": snapshot["accepting_online_orders"],
+            "reason": snapshot["reason"],
+            "active_orders": snapshot["active_online_orders"],
+            "maximum_orders": snapshot["max_online_orders"],
+            "available_capacity": snapshot["available_capacity"],
+            "capacity_date": snapshot["capacity_date"],
+        })
+
+
+class ManagerOrderCapacityView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        shop = _manager_shop(request)
+        if not shop:
+            return Response({"error": "No shop assigned"}, status=status.HTTP_404_NOT_FOUND)
+        requested_date = parse_date(request.query_params.get("date", ""))
+        return Response(get_order_capacity_snapshot(shop, requested_date))
+
+    def patch(self, request):
+        shop = _manager_shop(request)
+        if not shop:
+            return Response({"error": "No shop assigned"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            maximum = int(request.data.get("max_online_orders"))
+        except (TypeError, ValueError):
+            return Response({"max_online_orders": "Enter a whole number."}, status=400)
+        if not 1 <= maximum <= 1000:
+            return Response({"max_online_orders": "Capacity must be between 1 and 1000."}, status=400)
+        with transaction.atomic():
+            shop = Shop.objects.select_for_update().get(pk=shop.pk)
+            old_value = shop.max_online_orders
+            shop.max_online_orders = maximum
+            shop.save(update_fields=["max_online_orders", "updated_at"])
+            if old_value != maximum:
+                ShopOrderCapacityAudit.objects.create(
+                    shop=shop, manager=request.user, action="capacity_changed",
+                    old_value=str(old_value), new_value=str(maximum),
+                )
+        return Response(get_order_capacity_snapshot(shop))
+
+
+class PauseOnlineOrdersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        shop = _manager_shop(request)
+        if not shop:
+            return Response({"error": "No shop assigned"}, status=status.HTTP_404_NOT_FOUND)
+        reason = str(request.data.get("reason", "")).strip()[:255]
+        with transaction.atomic():
+            shop = Shop.objects.select_for_update().get(pk=shop.pk)
+            shop.online_orders_manually_paused = True
+            shop.manual_pause_reason = reason
+            shop.paused_at = timezone.now()
+            shop.save(update_fields=["online_orders_manually_paused", "manual_pause_reason", "paused_at", "updated_at"])
+            ShopOrderCapacityAudit.objects.create(
+                shop=shop, manager=request.user, action="online_ordering_paused", reason=reason,
+            )
+        return Response(get_order_capacity_snapshot(shop))
+
+
+class ResumeOnlineOrdersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        shop = _manager_shop(request)
+        if not shop:
+            return Response({"error": "No shop assigned"}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            shop = Shop.objects.select_for_update().get(pk=shop.pk)
+            shop.online_orders_manually_paused = False
+            shop.manual_pause_reason = ""
+            shop.paused_at = None
+            shop.save(update_fields=["online_orders_manually_paused", "manual_pause_reason", "paused_at", "updated_at"])
+            ShopOrderCapacityAudit.objects.create(
+                shop=shop, manager=request.user, action="online_ordering_resumed",
+            )
+        return Response(get_order_capacity_snapshot(shop))
 
 
 class ManagerListView(APIView):

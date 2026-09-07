@@ -35,7 +35,12 @@ class ShopSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Shop
-        fields = "__all__"
+        exclude = [
+            "max_online_orders",
+            "online_orders_manually_paused",
+            "manual_pause_reason",
+            "paused_at",
+        ]
 
     def get_manager(self, obj):
         try:

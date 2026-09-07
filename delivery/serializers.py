@@ -1,7 +1,10 @@
 # delivery/serializers.py
 
 from rest_framework import serializers
-from .models import DeliveryBoyProfile, DeliveryAssignment, Parcel, DeliveryLocation, WalkInTokenCounter
+from .models import DeliveryBoyProfile, DeliveryAssignment, Parcel, DeliveryLocation, WalkInTokenCounter, DeliveryBoyOTP
+from accounts.models import User
+from django.contrib.auth import authenticate
+from django.utils import timezone
 
 
 class DeliveryBoyProfileSerializer(serializers.ModelSerializer):
@@ -112,3 +115,51 @@ class WalkInTokenCounterSerializer(serializers.ModelSerializer):
     class Meta:
         model = WalkInTokenCounter
         fields = ['id', 'shop', 'shop_code', 'business_date', 'last_token']
+        
+        
+
+# ============================================================
+# NEW: Auth Serializers
+# ============================================================
+
+class DeliveryBoyLoginSerializer(serializers.Serializer):
+    phone = serializers.CharField()
+    password = serializers.CharField(required=False, allow_blank=True)
+    otp = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        phone = attrs.get('phone')
+        password = attrs.get('password')
+        otp = attrs.get('otp')
+
+        if not phone:
+            raise serializers.ValidationError("Phone number is required.")
+
+        # OTP login
+        if otp:
+            try:
+                otp_obj = DeliveryBoyOTP.objects.filter(phone=phone, used=False).latest('created_at')
+                if otp_obj.expires_at < timezone.now():
+                    raise serializers.ValidationError("OTP has expired.")
+                if otp_obj.otp_code != otp:
+                    raise serializers.ValidationError("Invalid OTP.")
+            except DeliveryBoyOTP.DoesNotExist:
+                raise serializers.ValidationError("Invalid OTP.")
+            attrs['otp_obj'] = otp_obj
+            return attrs
+
+        # Password login
+        if not password:
+            raise serializers.ValidationError("Password or OTP is required.")
+
+        # Find user by phone
+        try:
+            user = User.objects.get(phone=phone, role='delivery_boy')
+        except User.DoesNotExist:
+            raise serializers.ValidationError("No delivery boy found with this phone number.")
+
+        user = authenticate(username=user.username, password=password)
+        if not user:
+            raise serializers.ValidationError("Invalid password.")
+        attrs['user'] = user
+        return attrs

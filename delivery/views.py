@@ -5,7 +5,8 @@ from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, status, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
 from django.core.exceptions import ValidationError
 from rest_framework.generics import RetrieveAPIView
 from django.utils import timezone
@@ -16,12 +17,12 @@ from shops.models import Shop
 from accounts.models import User
 from .models import (
     DeliveryBoyProfile, DeliveryAssignment, Parcel,
-    DeliveryLocation, WalkInTokenCounter
+    DeliveryLocation, WalkInTokenCounter, DeliveryBoyOTP
 )
 from .serializers import (
     DeliveryBoyProfileSerializer, DeliveryBoyProfileDetailSerializer,
     DeliveryAssignmentSerializer, ParcelSerializer,
-    DeliveryLocationSerializer, WalkInTokenCounterSerializer
+    DeliveryLocationSerializer, WalkInTokenCounterSerializer, DeliveryBoyLoginSerializer
 )
 from .permissions import (
     IsDeliveryBoy, IsManagerOrSuperAdmin, IsOwnShopManager, IsOwnDeliveryBoy
@@ -33,8 +34,68 @@ from .services import (
     confirm_delivery, haversine_distance
 )
 from orders.serializers import OrderSerializer
+from .permissions import IsDeliveryBoy
+from accounts.models import User
+import random
 
 
+# ============================================================
+# NEW: Auth Views for Delivery Boy
+# ============================================================
+
+class DeliveryBoyRequestOTPView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        phone = request.data.get('phone')
+        if not phone:
+            return Response({'error': 'Phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if delivery boy exists
+        try:
+            user = User.objects.get(phone=phone, role='delivery_boy')
+        except User.DoesNotExist:
+            return Response({'error': 'No delivery boy found with this phone number.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Generate OTP
+        otp_obj = DeliveryBoyOTP.generate_otp(phone)
+
+        # TODO: Integrate SMS/WhatsApp gateway (send OTP)
+        # For development, print to console
+        print(f"Delivery Boy OTP for {phone}: {otp_obj.otp_code}")
+
+        return Response({'message': 'OTP sent successfully.'}, status=status.HTTP_200_OK)
+
+
+class DeliveryBoyLoginView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = DeliveryBoyLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        if 'otp_obj' in data:
+            # OTP login
+            user = User.objects.get(phone=data['phone'], role='delivery_boy')
+            data['otp_obj'].used = True
+            data['otp_obj'].save()
+        else:
+            user = data['user']
+
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': user.id,
+                'phone': user.phone,
+                'role': user.role,
+            }
+        }, status=status.HTTP_200_OK)
+        
+        
 # ============================================================
 #  DELIVERY BOY PROFILE VIEWS
 # ============================================================

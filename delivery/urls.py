@@ -1,11 +1,14 @@
 # delivery/urls.py
+
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     DeliveryBoyProfileViewSet, DeliveryAssignmentViewSet,
     ParcelViewSet, DeliveryLocationViewSet,
     DeliveryStatisticsView, DeliveryDashboardView,
-    ReadyOrdersForDeliveryView, OrderTrackingView
+    ReadyOrdersForDeliveryView,
+    DeliveryBoyRequestOTPView, DeliveryBoyLoginView,   # <-- New
+    OrderTrackingView
 )
 
 router = DefaultRouter()
@@ -16,6 +19,8 @@ router.register(r'location', DeliveryLocationViewSet, basename='delivery-locatio
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('auth/request-otp/', DeliveryBoyRequestOTPView.as_view(), name='delivery-request-otp'),
+    path('auth/login/', DeliveryBoyLoginView.as_view(), name='delivery-login'),
     path('statistics/', DeliveryStatisticsView.as_view(), name='delivery-statistics'),
     path('dashboard/', DeliveryDashboardView.as_view(), name='delivery-dashboard'),
     path('orders/ready/', ReadyOrdersForDeliveryView.as_view(), name='ready-orders'),

@@ -235,3 +235,30 @@ class DeliveryLocation(models.Model):
 
     def __str__(self):
         return f"{self.delivery_boy.full_name} @ {self.recorded_at}"
+    
+    
+
+# ============================================================
+# NEW: Delivery Boy OTP for Authentication
+# ============================================================
+
+class DeliveryBoyOTP(models.Model):
+    phone = models.CharField(max_length=20)
+    otp_code = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used = models.BooleanField(default=False)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['phone', 'used']),
+        ]
+
+    def __str__(self):
+        return f"OTP for {self.phone}"
+
+    @classmethod
+    def generate_otp(cls, phone):
+        otp = ''.join(secrets.choice(string.digits) for _ in range(6))
+        expires_at = timezone.now() + timezone.timedelta(minutes=5)
+        return cls.objects.create(phone=phone, otp_code=otp, expires_at=expires_at)

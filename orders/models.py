@@ -253,6 +253,11 @@ class Order(models.Model):
 
     def __str__(self):
         return self.order_number
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["shop", "order_type", "status"]),
+        ]
     
     @property
     def is_paid(self):

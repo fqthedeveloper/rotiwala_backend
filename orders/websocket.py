@@ -5,6 +5,7 @@ from asgiref.sync import (
 from channels.layers import (
     get_channel_layer
 )
+from shops.services import get_order_capacity_snapshot
 
 
 def send_order_update(
@@ -14,6 +15,8 @@ def send_order_update(
     channel_layer = (
         get_channel_layer()
     )
+
+    capacity = get_order_capacity_snapshot(order.shop)
 
     async_to_sync(
         channel_layer.group_send
@@ -27,6 +30,7 @@ def send_order_update(
                 "order_number": order.order_number,
                 "status": order.status,
                 "payment_status": order.payment_status,
+                "capacity": capacity,
             }
         }
     )
@@ -43,6 +47,7 @@ def send_order_update(
                 "order_number": order.order_number,
                 "status": order.status,
                 "payment_status": order.payment_status,
+                "capacity": capacity,
             }
         }
     )
@@ -56,6 +61,8 @@ def send_new_order(
         get_channel_layer()
     )
 
+    capacity = get_order_capacity_snapshot(order.shop)
+
     async_to_sync(
         channel_layer.group_send
     )(
@@ -68,6 +75,7 @@ def send_new_order(
                 "order_number": order.order_number,
                 "status": order.status,
                 "payment_status": order.payment_status,
+                "capacity": capacity,
             }
         }
     )

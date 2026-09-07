@@ -6,8 +6,19 @@ from django.conf.urls.static import static
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
+from shops.views import (
+    OnlineOrderStatusView,
+    ManagerOrderCapacityView,
+    PauseOnlineOrdersView,
+    ResumeOnlineOrdersView,
+)
 
 urlpatterns = [
+
+    path("api/shop/online-order-status/", OnlineOrderStatusView.as_view()),
+    path("api/manager/settings/order-capacity/", ManagerOrderCapacityView.as_view()),
+    path("api/manager/settings/order-capacity/pause/", PauseOnlineOrdersView.as_view()),
+    path("api/manager/settings/order-capacity/resume/", ResumeOnlineOrdersView.as_view()),
 
     path(
         "api/token/refresh/",

@@ -61,6 +61,7 @@ from discounts.offer_engine import OfferEngine                          # <-- im
 from discounts.models import Discount, DiscountUsage                # <-- for usage tracking
 from discounts.coupon_models import CouponUsage            # <-- for coupon usage
 from accounts.models import CustomerDeliveryAddress, User, CustomerProfile
+from shops.services import ensure_online_order_capacity, OnlineOrderingUnavailable
 
 import math
 
@@ -108,7 +109,7 @@ class PlaceOrderView(APIView):
             return Response({"error": "Shop ID required"}, status=400)
 
         try:
-            shop = Shop.objects.get(id=shop_id, is_active=True)
+            shop = Shop.objects.select_for_update().get(id=shop_id, is_active=True)
         except Shop.DoesNotExist:
             return Response({"error": "Shop not found"}, status=404)
 
@@ -230,6 +231,18 @@ class PlaceOrderView(APIView):
             if parsed_pickup_time <= timezone.now():
                 return Response({"error": "Pickup time must be in the future."}, status=400)
 
+        capacity_date = (
+            timezone.localtime(parsed_pickup_time).date()
+            if parsed_pickup_time else None
+        )
+        try:
+            capacity_snapshot = ensure_online_order_capacity(shop, capacity_date)
+        except OnlineOrderingUnavailable as exc:
+            return Response(
+                {"code": exc.code, "message": exc.message},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         # -------------------------------------------
         # Promotion selection (unchanged)
         # -------------------------------------------
@@ -254,9 +267,7 @@ class PlaceOrderView(APIView):
         # ============================================
         # 2. Estimate preparation time (unchanged)
         # ============================================
-        active_orders = Order.objects.filter(
-            shop=shop, status__in=["accepted", "preparing"]
-        ).count()
+        active_orders = capacity_snapshot["active_online_orders"]
 
         estimated_minutes = 20
         if active_orders >= 5:

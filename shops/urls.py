@@ -9,9 +9,16 @@ from .views import (
     MyShopView,
     ManagerListView,
     NearbyShopView,
+    OnlineOrderStatusView, ManagerOrderCapacityView,
+    PauseOnlineOrdersView, ResumeOnlineOrdersView,
 )
 
 urlpatterns = [
+
+    path("online-order-status/", OnlineOrderStatusView.as_view()),
+    path("manager/settings/order-capacity/", ManagerOrderCapacityView.as_view()),
+    path("manager/settings/order-capacity/pause/", PauseOnlineOrdersView.as_view()),
+    path("manager/settings/order-capacity/resume/", ResumeOnlineOrdersView.as_view()),
 
     # ==========================
     # PUBLIC

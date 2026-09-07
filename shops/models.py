@@ -90,6 +90,11 @@ class Shop(models.Model):
         default='manual'
     )
 
+    max_online_orders = models.PositiveIntegerField(default=100)
+    online_orders_manually_paused = models.BooleanField(default=False)
+    manual_pause_reason = models.CharField(max_length=255, blank=True, null=True)
+    paused_at = models.DateTimeField(blank=True, null=True)
+
     class Meta:
         ordering = ["name"]
 
@@ -107,6 +112,23 @@ class Shop(models.Model):
             self.shop_code = f"RT{self.id}"
 
             super().save(update_fields=["shop_code"])
+
+
+class ShopOrderCapacityAudit(models.Model):
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="order_capacity_audits")
+    manager = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="order_capacity_audits",
+    )
+    action = models.CharField(max_length=40)
+    old_value = models.CharField(max_length=255, blank=True)
+    new_value = models.CharField(max_length=255, blank=True)
+    reason = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["shop", "created_at"])]
     
 
 class ShopMenuItem(models.Model):
