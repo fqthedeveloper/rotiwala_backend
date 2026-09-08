@@ -122,10 +122,22 @@ class PlaceOrderView(APIView):
         if not cart_items.exists():
             return Response({"error": "Cart Empty"}, status=400)
 
+        delivery_option = request.data.get("delivery_option", "pickup")
+        cart_subtotal = sum(
+            (item.total_price for item in cart_items),
+            Decimal("0.00"),
+        )
+        minimum_delivery_order = shop.minimum_delivery_order or Decimal("0.00")
+        if delivery_option == "delivery" and cart_subtotal < minimum_delivery_order:
+            return Response({
+                "code": "MINIMUM_DELIVERY_ORDER_NOT_MET",
+                "error": f"Delivery requires a minimum order of ₹{minimum_delivery_order}.",
+                "minimum_delivery_order": str(minimum_delivery_order),
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # -------------------------------------------
         # Delivery option and address handling (UPDATED)
         # -------------------------------------------
-        delivery_option = request.data.get("delivery_option", "pickup")
         delivery_address = ""
         delivery_lat = None
         delivery_lng = None
@@ -285,6 +297,13 @@ class PlaceOrderView(APIView):
         # ============================================
         # 3. Create the order skeleton
         # ============================================
+        delivery_fee = Decimal("0.00")
+        free_delivery_min_order = shop.free_delivery_min_order or Decimal("0.00")
+        if delivery_option == "delivery" and (
+            free_delivery_min_order <= 0 or cart_subtotal < free_delivery_min_order
+        ):
+            delivery_fee = shop.delivery_fee or Decimal("0.00")
+
         order = Order.objects.create(
             order_number=generate_online_order_number(shop),
             customer=request.user,
@@ -307,7 +326,7 @@ class PlaceOrderView(APIView):
             delivery_address=delivery_address if delivery_option == "delivery" else "",
             delivery_latitude=delivery_lat if delivery_option == "delivery" else None,
             delivery_longitude=delivery_lng if delivery_option == "delivery" else None,
-            delivery_fee=Decimal("0.00"),
+            delivery_fee=delivery_fee,
         )
 
         # ============================================
@@ -349,7 +368,7 @@ class PlaceOrderView(APIView):
         # ============================================
         order.original_amount = original_amount
         order.discount_amount = discount_amount
-        order.total_amount = final_amount
+        order.total_amount = final_amount + delivery_fee
         order.discount = selected_discount
         order.coupon = selected_coupon
 

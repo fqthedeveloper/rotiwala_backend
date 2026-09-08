@@ -84,6 +84,24 @@ class Shop(models.Model):
         default=2.00,
         help_text="Maximum delivery radius in kilometers"
     )
+    delivery_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Delivery fee charged below the free-delivery threshold"
+    )
+    free_delivery_min_order = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Minimum discounted subtotal required for free delivery; zero means always free"
+    )
+    minimum_delivery_order = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Minimum discounted subtotal required to select delivery"
+    )
     delivery_assignment_mode = models.CharField(
         max_length=10,
         choices=(('manual', 'Manual'), ('auto', 'Automatic')),

@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db import transaction
+from decimal import Decimal, InvalidOperation
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser  # <-- ADD JSONParser
 
 from accounts.permissions import IsSuperAdmin, CanReadOwnShop
@@ -162,29 +163,66 @@ class ManagerOrderCapacityView(APIView):
         if not shop:
             return Response({"error": "No shop assigned"}, status=status.HTTP_404_NOT_FOUND)
         requested_date = parse_date(request.query_params.get("date", ""))
-        return Response(get_order_capacity_snapshot(shop, requested_date))
+        snapshot = get_order_capacity_snapshot(shop, requested_date)
+        snapshot.update({
+            "delivery_radius_km": shop.delivery_radius_km,
+            "delivery_fee": shop.delivery_fee,
+            "free_delivery_min_order": shop.free_delivery_min_order,
+            "minimum_delivery_order": shop.minimum_delivery_order,
+        })
+        return Response(snapshot)
 
     def patch(self, request):
         shop = _manager_shop(request)
         if not shop:
             return Response({"error": "No shop assigned"}, status=status.HTTP_404_NOT_FOUND)
-        try:
-            maximum = int(request.data.get("max_online_orders"))
-        except (TypeError, ValueError):
-            return Response({"max_online_orders": "Enter a whole number."}, status=400)
-        if not 1 <= maximum <= 1000:
-            return Response({"max_online_orders": "Capacity must be between 1 and 1000."}, status=400)
+        maximum_value = request.data.get("max_online_orders")
+        maximum = None
+        if maximum_value not in (None, ""):
+            try:
+                maximum = int(maximum_value)
+            except (TypeError, ValueError):
+                return Response({"max_online_orders": "Enter a whole number."}, status=400)
+            if not 1 <= maximum <= 1000:
+                return Response({"max_online_orders": "Capacity must be between 1 and 1000."}, status=400)
+
+        decimal_fields = (
+            "delivery_radius_km",
+            "delivery_fee",
+            "free_delivery_min_order",
+            "minimum_delivery_order",
+        )
+        updates = {}
+        for field in decimal_fields:
+            if field in request.data:
+                try:
+                    value = Decimal(str(request.data[field]))
+                except (TypeError, ValueError, InvalidOperation):
+                    return Response({field: "Enter a valid non-negative number."}, status=400)
+                if value < 0 or (field == "delivery_radius_km" and value == 0):
+                    return Response({field: "Enter a positive value."}, status=400)
+                updates[field] = value
+        if maximum is None and not updates:
+            return Response({"detail": "No settings supplied."}, status=400)
         with transaction.atomic():
             shop = Shop.objects.select_for_update().get(pk=shop.pk)
-            old_value = shop.max_online_orders
-            shop.max_online_orders = maximum
-            shop.save(update_fields=["max_online_orders", "updated_at"])
-            if old_value != maximum:
+            update_fields = ["updated_at"]
+            if maximum is not None:
+                old_value = shop.max_online_orders
+                shop.max_online_orders = maximum
+                update_fields.append("max_online_orders")
+            for field, value in updates.items():
+                setattr(shop, field, value)
+                update_fields.append(field)
+            shop.save(update_fields=update_fields)
+            if maximum is not None and old_value != maximum:
                 ShopOrderCapacityAudit.objects.create(
                     shop=shop, manager=request.user, action="capacity_changed",
                     old_value=str(old_value), new_value=str(maximum),
                 )
-        return Response(get_order_capacity_snapshot(shop))
+        snapshot = get_order_capacity_snapshot(shop)
+        snapshot.update({field: getattr(shop, field) for field in decimal_fields})
+        return Response(snapshot)
 
 
 class PauseOnlineOrdersView(APIView):

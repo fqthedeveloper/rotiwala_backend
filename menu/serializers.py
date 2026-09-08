@@ -7,7 +7,7 @@ from discounts.services import get_discounted_price
 class MenuItemSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     shop = serializers.ReadOnlyField(source="shop.id")
-
+    category_name = serializers.ReadOnlyField(source="category.name")
     original_price = serializers.SerializerMethodField()
     discount_amount = serializers.SerializerMethodField()
     final_price = serializers.SerializerMethodField()
@@ -19,7 +19,7 @@ class MenuItemSerializer(serializers.ModelSerializer):
         model = MenuItem
         fields = [
             "id", "shop", "category", "name", "description",
-            "image", "image_url", "base_price",
+            "category_name", "image", "image_url", "base_price",
             "original_price", "discount_amount", "final_price",
             "has_discount", "discount_percentage", "discount_name",
             "is_active", "is_available", "created_at",
