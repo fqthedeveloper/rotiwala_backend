@@ -72,6 +72,8 @@ class ParcelSerializer(serializers.ModelSerializer):
         read_only_fields = ['parcel_number', 'qr_token', 'created_at']
 
 
+# delivery/serializers.py
+
 class DeliveryAssignmentSerializer(serializers.ModelSerializer):
     delivery_boy_name = serializers.CharField(source='delivery_boy.full_name', read_only=True)
     delivery_boy_phone = serializers.CharField(source='delivery_boy.phone', read_only=True)
@@ -79,12 +81,26 @@ class DeliveryAssignmentSerializer(serializers.ModelSerializer):
     shop_code = serializers.CharField(source='shop.shop_code', read_only=True)
     parcel_number = serializers.CharField(source='parcel.parcel_number', read_only=True, allow_null=True)
 
+    # 🔹 ADD THESE CUSTOMER & DELIVERY FIELDS FROM ORDER
+    customer_name = serializers.CharField(source='order.customer_name', read_only=True)
+    customer_phone = serializers.CharField(source='order.customer_phone', read_only=True)
+    delivery_address = serializers.CharField(source='order.delivery_address', read_only=True)
+    delivery_latitude = serializers.CharField(source='order.delivery_latitude', read_only=True, allow_null=True)
+    delivery_longitude = serializers.CharField(source='order.delivery_longitude', read_only=True, allow_null=True)
+    total_amount = serializers.CharField(source='order.total_amount', read_only=True)
+    payment_method = serializers.CharField(source='order.payment_method', read_only=True)
+    payment_status = serializers.CharField(source='order.payment_status', read_only=True)
+
     class Meta:
         model = DeliveryAssignment
         fields = [
             'id', 'order', 'order_number', 'parcel', 'parcel_number',
             'shop', 'shop_code', 'delivery_boy', 'delivery_boy_name',
             'delivery_boy_phone', 'assignment_mode', 'status',
+            # 🔹 INCLUDE NEW FIELDS IN FIELDS ARRAY
+            'customer_name', 'customer_phone', 'delivery_address',
+            'delivery_latitude', 'delivery_longitude',
+            'total_amount', 'payment_method', 'payment_status',
             'assigned_at', 'accepted_at', 'picked_up_at',
             'out_for_delivery_at', 'delivered_at',
             'estimated_distance_km', 'actual_distance_km',
@@ -94,7 +110,7 @@ class DeliveryAssignmentSerializer(serializers.ModelSerializer):
             'assigned_at', 'created_at', 'updated_at',
             'estimated_distance_km', 'actual_distance_km'
         ]
-
+        
 
 class DeliveryLocationSerializer(serializers.ModelSerializer):
     delivery_boy_name = serializers.CharField(source='delivery_boy.full_name', read_only=True)

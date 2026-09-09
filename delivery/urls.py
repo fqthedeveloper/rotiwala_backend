@@ -2,6 +2,7 @@
 
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     DeliveryBoyProfileViewSet, DeliveryAssignmentViewSet,
     ParcelViewSet, DeliveryLocationViewSet,
@@ -21,6 +22,8 @@ urlpatterns = [
     path('', include(router.urls)),
     path('auth/request-otp/', DeliveryBoyRequestOTPView.as_view(), name='delivery-request-otp'),
     path('auth/login/', DeliveryBoyLoginView.as_view(), name='delivery-login'),
+    path('auth/token/refresh/', TokenRefreshView.as_view(), name='delivery-token-refresh'),
+    path('update-location/', DeliveryLocationViewSet.as_view({'post': 'create'}), name='delivery-update-location'),
     path('statistics/', DeliveryStatisticsView.as_view(), name='delivery-statistics'),
     path('dashboard/', DeliveryDashboardView.as_view(), name='delivery-dashboard'),
     path('orders/ready/', ReadyOrdersForDeliveryView.as_view(), name='ready-orders'),

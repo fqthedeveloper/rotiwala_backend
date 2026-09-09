@@ -49,7 +49,11 @@ class MaintenanceExpenseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = MaintenanceExpense
-        fields = "__all__"
+        fields = [
+            'id', 'shop', 'shop_name', 'title', 'description', 'amount',
+            'maintenance_date', 'payment_method', 'utr_number',
+            'created_by', 'created_by_name', 'created_at',
+        ]
         extra_kwargs = {
             'shop': {'required': False},  # Handled manually in view
         }
@@ -127,7 +131,12 @@ class RawMaterialExpenseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RawMaterialExpense
-        fields = "__all__"
+        fields = [
+            'id', 'shop', 'shop_name', 'vendor', 'vendor_name', 'item', 'item_name',
+            'custom_item_name', 'quantity', 'unit', 'unit_display', 'unit_price',
+            'amount', 'note', 'payment_method', 'utr_number', 'expense_date',
+            'created_by', 'created_by_name', 'created_at', 'updated_at', 'expense_entry',
+        ]
         extra_kwargs = {
             'shop': {'required': False},  # Handled in view
         }

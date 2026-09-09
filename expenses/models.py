@@ -106,11 +106,18 @@ class MaintenanceExpense(models.Model):
     """
     Separate model for Maintenance. Managers can add these.
     """
+    PAYMENT_METHODS = [
+        ('CASH', 'Cash'),
+        ('UPI', 'UPI'),
+    ]
+
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE)
     title = models.CharField(max_length=255)
     description = models.TextField()
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     maintenance_date = models.DateField()
+    payment_method = models.CharField(max_length=16, choices=PAYMENT_METHODS, default='CASH')
+    utr_number = models.CharField(max_length=80, blank=True, null=True, default='')
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -213,6 +220,10 @@ class RawMaterialExpense(models.Model):
         ('PIECE', 'Piece'),
         ('OTHER', 'Other'),
     ]
+    PAYMENT_METHODS = [
+        ('CASH', 'Cash'),
+        ('UPI', 'UPI'),
+    ]
 
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name='raw_material_expenses')
     vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True, related_name='expenses')
@@ -224,6 +235,8 @@ class RawMaterialExpense(models.Model):
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     note = models.TextField(blank=True, null=True)
+    payment_method = models.CharField(max_length=16, choices=PAYMENT_METHODS, default='CASH')
+    utr_number = models.CharField(max_length=80, blank=True, null=True, default='')
 
     expense_date = models.DateField(default=timezone.now)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
