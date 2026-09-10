@@ -144,23 +144,42 @@ class DeliveryBoyLoginSerializer(serializers.Serializer):
     otp = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
-        phone = attrs.get('phone')
+        raw_phone = attrs.get('phone')
         password = attrs.get('password')
         otp = attrs.get('otp')
 
-        if not phone:
+        if not raw_phone:
             raise serializers.ValidationError("Phone number is required.")
+
+        # Normalize phone variants (with and without +91 / 91)
+        clean_digits = ''.join(filter(str.isdigit, str(raw_phone)))
+        phone_variants = [raw_phone.strip()]
+        if len(clean_digits) == 10:
+            phone_variants.extend([f"+91{clean_digits}", clean_digits, f"91{clean_digits}"])
+        elif len(clean_digits) == 12 and clean_digits.startswith('91'):
+            phone_variants.extend([f"+{clean_digits}", clean_digits[2:], clean_digits])
+
+        # Find delivery boy user
+        user = User.objects.filter(phone__in=phone_variants, role='delivery_boy').first()
+        if not user:
+            raise serializers.ValidationError("No delivery boy found with this phone number.")
+
+        attrs['user'] = user
+        attrs['phone'] = user.phone
 
         # OTP login
         if otp:
             try:
-                otp_obj = DeliveryBoyOTP.objects.filter(phone=phone, used=False).latest('created_at')
+                otp_obj = DeliveryBoyOTP.objects.filter(
+                    phone__in=phone_variants + [user.phone],
+                    used=False
+                ).latest('created_at')
                 if otp_obj.expires_at < timezone.now():
                     raise serializers.ValidationError("OTP has expired.")
-                if otp_obj.otp_code != otp:
+                if otp_obj.otp_code != str(otp).strip():
                     raise serializers.ValidationError("Invalid OTP.")
             except DeliveryBoyOTP.DoesNotExist:
-                raise serializers.ValidationError("Invalid OTP.")
+                raise serializers.ValidationError("Invalid or expired OTP.")
             attrs['otp_obj'] = otp_obj
             return attrs
 
@@ -168,14 +187,8 @@ class DeliveryBoyLoginSerializer(serializers.Serializer):
         if not password:
             raise serializers.ValidationError("Password or OTP is required.")
 
-        # Find user by phone
-        try:
-            user = User.objects.get(phone=phone, role='delivery_boy')
-        except User.DoesNotExist:
-            raise serializers.ValidationError("No delivery boy found with this phone number.")
-
-        user = authenticate(username=user.username, password=password)
-        if not user:
+        auth_user = authenticate(username=user.username, password=password)
+        if not auth_user:
             raise serializers.ValidationError("Invalid password.")
-        attrs['user'] = user
+        attrs['user'] = auth_user
         return attrs

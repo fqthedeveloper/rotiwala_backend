@@ -39,6 +39,13 @@ from accounts.models import User
 import random
 
 
+from django.conf import settings
+from whatsapp.services import WhatsAppService
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 # ============================================================
 # NEW: Auth Views for Delivery Boy
 # ============================================================
@@ -47,24 +54,57 @@ class DeliveryBoyRequestOTPView(generics.GenericAPIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        phone = request.data.get('phone')
-        if not phone:
+        raw_phone = request.data.get('phone')
+        if not raw_phone:
             return Response({'error': 'Phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Normalize phone variants (with and without +91 / 91)
+        clean_digits = ''.join(filter(str.isdigit, str(raw_phone)))
+        phone_variants = [raw_phone.strip()]
+        if len(clean_digits) == 10:
+            phone_variants.extend([f"+91{clean_digits}", clean_digits, f"91{clean_digits}"])
+        elif len(clean_digits) == 12 and clean_digits.startswith('91'):
+            phone_variants.extend([f"+{clean_digits}", clean_digits[2:], clean_digits])
+
         # Check if delivery boy exists
-        try:
-            user = User.objects.get(phone=phone, role='delivery_boy')
-        except User.DoesNotExist:
-            return Response({'error': 'No delivery boy found with this phone number.'}, status=status.HTTP_404_NOT_FOUND)
+        user = User.objects.filter(phone__in=phone_variants, role='delivery_boy').first()
+        if not user:
+            return Response({
+                'error': f"No delivery boy found with phone number '{raw_phone}'. Please verify in Django Admin that an account exists with Role='Delivery Boy'."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Target phone for WhatsApp (ensure standard international format e.g. +91XXXXXXXXXX)
+        target_phone = user.phone if user.phone.startswith('+') else (f"+91{user.phone}" if len(user.phone) == 10 else f"+{user.phone}")
 
         # Generate OTP
-        otp_obj = DeliveryBoyOTP.generate_otp(phone)
+        otp_obj = DeliveryBoyOTP.generate_otp(user.phone)
 
-        # TODO: Integrate SMS/WhatsApp gateway (send OTP)
-        # For development, print to console
-        print(f"Delivery Boy OTP for {phone}: {otp_obj.otp_code}")
+        # Send OTP via WhatsApp
+        whatsapp_sent = False
+        whatsapp_error = None
+        try:
+            WhatsAppService.send_otp(target_phone, otp_obj.otp_code)
+            whatsapp_sent = True
+            logger.info(f"WhatsApp OTP sent to delivery boy {target_phone}")
+        except Exception as e:
+            whatsapp_error = str(e)
+            logger.error(f"Failed to send WhatsApp OTP to {target_phone}: {e}")
 
-        return Response({'message': 'OTP sent successfully.'}, status=status.HTTP_200_OK)
+        resp_data = {
+            'message': 'OTP sent to your WhatsApp successfully.' if whatsapp_sent else 'OTP generated, but WhatsApp delivery failed.',
+            'phone': user.phone,
+            'whatsapp_sent': whatsapp_sent,
+        }
+        if not whatsapp_sent and whatsapp_error:
+            resp_data['whatsapp_error'] = whatsapp_error
+
+        # In DEBUG mode, return OTP in response for testing
+        if getattr(settings, 'DEBUG', False):
+            resp_data['dev_otp'] = otp_obj.otp_code
+
+        # If WhatsApp failed and not in DEBUG, return 500 so frontend knows
+        status_code = status.HTTP_200_OK if (whatsapp_sent or getattr(settings, 'DEBUG', False)) else status.HTTP_500_INTERNAL_SERVER_ERROR
+        return Response(resp_data, status=status_code)
 
 
 class DeliveryBoyLoginView(generics.GenericAPIView):
@@ -77,9 +117,9 @@ class DeliveryBoyLoginView(generics.GenericAPIView):
 
         if 'otp_obj' in data:
             # OTP login
-            user = User.objects.get(phone=data['phone'], role='delivery_boy')
+            user = data['user']
             data['otp_obj'].used = True
-            data['otp_obj'].save()
+            data['otp_obj'].save(update_fields=['used'])
         else:
             user = data['user']
 
@@ -92,10 +132,11 @@ class DeliveryBoyLoginView(generics.GenericAPIView):
                 'id': user.id,
                 'phone': user.phone,
                 'role': user.role,
+                'username': user.username,
             }
         }, status=status.HTTP_200_OK)
-        
-        
+
+
 # ============================================================
 #  DELIVERY BOY PROFILE VIEWS
 # ============================================================
