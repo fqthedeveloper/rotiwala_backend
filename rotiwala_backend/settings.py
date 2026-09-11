@@ -154,6 +154,10 @@ REST_FRAMEWORK = {
     )
 }
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://backend.alidarbar.in/"
+]
+
 from datetime import timedelta
 
 SIMPLE_JWT = {
