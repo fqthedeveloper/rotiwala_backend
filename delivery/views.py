@@ -331,7 +331,7 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            assignment = auto_assign_delivery(order)
+            assignment = auto_assign_delivery(order, force=True)
             return Response(DeliveryAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
         except ValidationError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

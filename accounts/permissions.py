@@ -21,6 +21,26 @@ class IsManager(BasePermission):
         )
 
 
+class IsPreparingStaff(BasePermission):
+
+    def has_permission(self, request, view):
+
+        return (
+            request.user.is_authenticated and
+            request.user.role == "preparing_staff"
+        )
+
+
+class IsManagerOrPreparingStaff(BasePermission):
+
+    def has_permission(self, request, view):
+
+        return (
+            request.user.is_authenticated and
+            request.user.role in ("manager", "preparing_staff", "super_admin")
+        )
+
+
 class IsCustomer(BasePermission):
 
     def has_permission(self, request, view):

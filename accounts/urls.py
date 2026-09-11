@@ -33,6 +33,9 @@ from .views import (
     VerifyPasswordResetOTPView,
     # NEW:
     CustomerAddressViewSet,
+    PreparingStaffListCreateView,
+    PreparingStaffDetailView,
+    PreparingStaffSelfProfileView,
 )
 
 # ============================================================
@@ -63,6 +66,11 @@ urlpatterns = [
     path("create-manager/", CreateManagerView.as_view()),
     path("assign-manager/", AssignManagerView.as_view()),
     path("managers/<int:pk>/", ManagerDetailView.as_view()),
+
+    # Preparing staff management (manager or super admin)
+    path("preparing-staff/", PreparingStaffListCreateView.as_view(), name="preparing-staff-list"),
+    path("preparing-staff/me/", PreparingStaffSelfProfileView.as_view(), name="preparing-staff-me"),
+    path("preparing-staff/<int:pk>/", PreparingStaffDetailView.as_view(), name="preparing-staff-detail"),
 
     # Customer management
     path('customers/', CustomerListView.as_view(), name='customer-list'),

@@ -130,8 +130,15 @@ class MaintenanceExpense(models.Model):
 
 
 class Staff(models.Model):
-    """Staff members (e.g., chefs, waiters)"""
+    """Staff members (e.g., chefs, waiters, kitchen preparing staff)"""
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name='staff')
+    user = models.OneToOneField(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='expense_staff'
+    )
     name = models.CharField(max_length=200)
     phone = models.CharField(max_length=15, blank=True, null=True)
     monthly_salary = models.DecimalField(max_digits=10, decimal_places=2, default=0)

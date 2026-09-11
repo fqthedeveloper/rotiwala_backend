@@ -1,7 +1,12 @@
-# accounts/serializers.py
-
 from rest_framework import serializers
-from .models import User, CustomerProfile, CustomerFlag, ManagerProfile, CustomerDeliveryAddress
+from .models import (
+    User,
+    CustomerProfile,
+    CustomerFlag,
+    ManagerProfile,
+    PreparingStaffProfile,
+    CustomerDeliveryAddress,
+)
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -25,13 +30,15 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_shop_id(self, obj):
         try:
-            return obj.manager_profile.shop.id
+            shop = obj.staff_shop
+            return shop.id if shop else None
         except Exception:
             return None
 
     def get_shop_name(self, obj):
         try:
-            return obj.manager_profile.shop.name
+            shop = obj.staff_shop
+            return shop.name if shop else None
         except Exception:
             return None
 
@@ -140,3 +147,82 @@ class CustomerDeliveryAddressSerializer(serializers.ModelSerializer):
             'is_default', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+
+# ============================================================
+# Preparing Staff Serializers
+# ============================================================
+
+class PreparingStaffProfileSerializer(serializers.ModelSerializer):
+    shop_name = serializers.CharField(source='shop.name', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    username = serializers.CharField(source='user.username', read_only=True)
+    monthly_salary = serializers.SerializerMethodField()
+    expense_staff_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PreparingStaffProfile
+        fields = [
+            'id',
+            'user_id',
+            'username',
+            'full_name',
+            'phone',
+            'photo',
+            'shop',
+            'shop_name',
+            'is_active',
+            'monthly_salary',
+            'expense_staff_id',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def get_monthly_salary(self, obj):
+        try:
+            if hasattr(obj.user, 'expense_staff') and obj.user.expense_staff:
+                return str(obj.user.expense_staff.monthly_salary)
+        except Exception:
+            pass
+        return "0.00"
+
+    def get_expense_staff_id(self, obj):
+        try:
+            if hasattr(obj.user, 'expense_staff') and obj.user.expense_staff:
+                return obj.user.expense_staff.id
+        except Exception:
+            pass
+        return None
+
+
+class PreparingStaffSerializer(serializers.ModelSerializer):
+    shop_id = serializers.SerializerMethodField()
+    shop_name = serializers.SerializerMethodField()
+    profile = PreparingStaffProfileSerializer(source='preparing_staff_profile', read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'username',
+            'first_name',
+            'last_name',
+            'phone',
+            'email',
+            'role',
+            'shop_id',
+            'shop_name',
+            'profile',
+        ]
+
+    def get_shop_id(self, obj):
+        try:
+            return obj.preparing_staff_profile.shop.id
+        except Exception:
+            return None
+
+    def get_shop_name(self, obj):
+        try:
+            return obj.preparing_staff_profile.shop.name
+        except Exception:
+            return None

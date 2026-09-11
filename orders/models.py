@@ -249,14 +249,32 @@ class Order(models.Model):
     pickup_by_other_person = models.BooleanField(
         default=False
     )
-    
+
+    token_number = models.CharField(
+        max_length=10,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Sequential walk-in token number for the day"
+    )
+
+    business_date = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Business date for token sequencing"
+    )
 
     def __str__(self):
+        if self.token_number:
+            return f"Token #{self.token_number} ({self.order_number})"
         return self.order_number
 
     class Meta:
         indexes = [
             models.Index(fields=["shop", "order_type", "status"]),
+            models.Index(fields=["shop", "business_date", "status"]),
+            models.Index(fields=["token_number"]),
         ]
     
     @property

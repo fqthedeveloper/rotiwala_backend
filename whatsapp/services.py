@@ -75,7 +75,7 @@ class WhatsAppService:
                 message_id=result.get("messages", [{}])[0].get("id", "")
             )
 
-            print("✅ WhatsApp message sent successfully")
+            logger.info("WhatsApp message sent successfully")
 
             return {
                 "success": True,
@@ -92,10 +92,7 @@ class WhatsAppService:
             else:
                 error_msg = str(e)
 
-            print("❌ WhatsApp API Error")
-            print(error_msg)
-
-            logger.error(error_msg)
+            logger.error("WhatsApp API Error: %s", error_msg)
 
             WhatsAppMessageLog.objects.create(
                 template_name=template_name,

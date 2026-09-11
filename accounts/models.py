@@ -9,6 +9,7 @@ class User(AbstractUser):
     ROLE_CHOICES = (
         ("super_admin", "Super Admin"),
         ("manager", "Manager"),
+        ("preparing_staff", "Preparing Staff"),
         ("customer", "Customer"),
         ("delivery_boy", "Delivery Boy"),
     )
@@ -48,6 +49,17 @@ class User(AbstractUser):
     created_at = models.DateTimeField(
         auto_now_add=True
     )
+
+    @property
+    def staff_shop(self):
+        """Returns the shop associated with this user (for manager, preparing staff, or delivery boy)."""
+        if self.role == "manager" and hasattr(self, "manager_profile"):
+            return self.manager_profile.shop
+        if self.role == "preparing_staff" and hasattr(self, "preparing_staff_profile"):
+            return self.preparing_staff_profile.shop
+        if self.role == "delivery_boy" and hasattr(self, "delivery_profile"):
+            return self.delivery_profile.shop
+        return None
 
     def __str__(self):
         return f"{self.phone} ({self.role})"
@@ -133,6 +145,50 @@ class ManagerProfile(models.Model):
 
     def __str__(self):
         return self.full_name
+
+
+class PreparingStaffProfile(models.Model):
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="preparing_staff_profile"
+    )
+
+    shop = models.ForeignKey(
+        "shops.Shop",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="preparing_staff"
+    )
+
+    full_name = models.CharField(
+        max_length=255,
+        blank=True
+    )
+
+    phone = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True
+    )
+
+    photo = models.ImageField(
+        upload_to="preparing_staff/",
+        blank=True,
+        null=True
+    )
+
+    is_active = models.BooleanField(
+        default=True
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    def __str__(self):
+        return f"{self.full_name or self.user.username} ({self.shop.name if self.shop else 'No Shop'})"
 
 
 class CustomerFlag(models.Model):

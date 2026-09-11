@@ -5,9 +5,9 @@ from rest_framework.permissions import IsAuthenticated
 from .models import User
 from .models import CustomerProfile
 from .serializers import UserSerializer
-from .models import ManagerProfile
+from .models import ManagerProfile, PreparingStaffProfile
 from rest_framework import generics, status
-from .serializers import ManagerSerializer
+from .serializers import ManagerSerializer, PreparingStaffSerializer, PreparingStaffProfileSerializer
 from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.db.models import Sum, Count, Q
@@ -361,11 +361,14 @@ class PasswordLoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Check phone exists
-        try:
-            user = User.objects.get(phone=phone)
+        # Check phone exists (supporting with or without +91 prefix)
+        user = User.objects.filter(phone=phone).first()
+        if not user and phone.startswith("+91"):
+            user = User.objects.filter(phone=phone[3:]).first()
+        elif not user and not phone.startswith("+"):
+            user = User.objects.filter(phone=f"+91{phone}").first()
 
-        except User.DoesNotExist:
+        if not user:
             return Response(
                 {
                     "success": False,
@@ -1302,3 +1305,213 @@ class CustomerAddressViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(address)
             return Response(serializer.data)
         return Response({'detail': 'No default address set.'}, status=status.HTTP_404_NOT_FOUND)
+
+
+# ============================================================
+# PREPARING STAFF MANAGEMENT VIEWS
+# ============================================================
+
+class PreparingStaffListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        if request.user.role == "manager":
+            shop = request.user.staff_shop
+            if not shop:
+                return Response({"error": "Manager has no assigned shop."}, status=status.HTTP_400_BAD_REQUEST)
+            profiles = PreparingStaffProfile.objects.filter(shop=shop)
+        else:
+            # super_admin
+            shop_id = request.query_params.get("shop_id")
+            if shop_id:
+                profiles = PreparingStaffProfile.objects.filter(shop_id=shop_id)
+            else:
+                profiles = PreparingStaffProfile.objects.all()
+
+        serializer = PreparingStaffProfileSerializer(profiles, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        phone = request.data.get("phone", "").strip()
+        full_name = request.data.get("full_name", "").strip()
+        password = request.data.get("password")
+
+        if not phone or not password:
+            return Response({"error": "Phone and password are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if User.objects.filter(phone=phone).exists():
+            return Response({"error": "User with this phone number already exists."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.user.role == "manager":
+            shop = request.user.staff_shop
+            if not shop:
+                return Response({"error": "Manager has no assigned shop."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            shop_id = request.data.get("shop_id")
+            if not shop_id:
+                return Response({"error": "shop_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                shop = Shop.objects.get(id=shop_id)
+            except Shop.DoesNotExist:
+                return Response({"error": "Shop not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = User.objects.create_user(
+            username=phone,
+            phone=phone,
+            password=password,
+            role="preparing_staff",
+            first_name=full_name.split(" ")[0] if full_name else "",
+            last_name=" ".join(full_name.split(" ")[1:]) if len(full_name.split(" ")) > 1 else "",
+        )
+
+        profile, _ = PreparingStaffProfile.objects.get_or_create(user=user)
+        profile.shop = shop
+        profile.full_name = full_name or phone
+        profile.phone = phone
+        profile.save()
+
+        # Bidirectional sync to expenses.Staff
+        from decimal import Decimal
+        from expenses.models import Staff
+        raw_salary = request.data.get("monthly_salary", 0)
+        try:
+            monthly_salary_val = Decimal(str(raw_salary or 0))
+        except Exception:
+            monthly_salary_val = Decimal("0")
+
+        staff_obj, created = Staff.objects.get_or_create(
+            shop=shop,
+            phone=phone,
+            defaults={
+                "user": user,
+                "name": full_name or phone,
+                "monthly_salary": monthly_salary_val,
+                "is_active": True,
+            }
+        )
+        if not created:
+            staff_obj.user = user
+            staff_obj.name = full_name or staff_obj.name
+            if request.data.get("monthly_salary") is not None:
+                staff_obj.monthly_salary = monthly_salary_val
+            staff_obj.save()
+
+        return Response(
+            PreparingStaffSerializer(user).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class PreparingStaffDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, pk, user):
+        try:
+            profile = PreparingStaffProfile.objects.get(id=pk)
+            if user.role == "manager" and profile.shop != user.staff_shop:
+                return None
+            return profile
+        except PreparingStaffProfile.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        if request.user.role not in ["manager", "super_admin", "preparing_staff"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        profile = self.get_object(pk, request.user)
+        if not profile:
+            return Response({"error": "Preparing staff not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(PreparingStaffProfileSerializer(profile).data)
+
+    def patch(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        profile = self.get_object(pk, request.user)
+        if not profile:
+            return Response({"error": "Preparing staff not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        full_name = request.data.get("full_name")
+        is_active = request.data.get("is_active")
+        new_password = request.data.get("password")
+
+        if full_name is not None:
+            profile.full_name = full_name
+            profile.user.first_name = full_name.split(" ")[0]
+            profile.user.last_name = " ".join(full_name.split(" ")[1:]) if len(full_name.split(" ")) > 1 else ""
+            profile.user.save(update_fields=["first_name", "last_name"])
+        if is_active is not None:
+            active_bool = str(is_active).strip().lower() in ["true", "1"] if isinstance(is_active, str) else bool(is_active)
+            profile.is_active = active_bool
+            profile.user.is_active = active_bool
+            profile.user.save(update_fields=["is_active"])
+        if new_password:
+            profile.user.set_password(new_password)
+            profile.user.save(update_fields=["password"])
+
+        profile.save()
+
+        # Bidirectional sync to expenses.Staff
+        from decimal import Decimal
+        from expenses.models import Staff
+        staff_obj = getattr(profile.user, 'expense_staff', None)
+        if not staff_obj:
+            staff_obj = Staff.objects.filter(shop=profile.shop, phone=profile.phone).first()
+            if staff_obj:
+                staff_obj.user = profile.user
+        if staff_obj:
+            if full_name is not None:
+                staff_obj.name = full_name
+            if is_active is not None:
+                staff_obj.is_active = profile.is_active
+            if request.data.get("monthly_salary") is not None:
+                try:
+                    staff_obj.monthly_salary = Decimal(str(request.data.get("monthly_salary")))
+                except Exception:
+                    pass
+            staff_obj.save()
+
+        return Response(PreparingStaffProfileSerializer(profile).data)
+
+    def delete(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        profile = self.get_object(pk, request.user)
+        if not profile:
+            return Response({"error": "Preparing staff not found."}, status=status.HTTP_404_NOT_FOUND)
+        user = profile.user
+        if hasattr(user, 'expense_staff') and user.expense_staff:
+            user.expense_staff.delete()
+        profile.delete()
+        user.delete()
+        return Response({"message": "Preparing staff deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class PreparingStaffSelfProfileView(APIView):
+    """
+    Self profile endpoint for logged-in preparing staff member.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role != "preparing_staff":
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        profile, _ = PreparingStaffProfile.objects.get_or_create(user=request.user)
+        return Response(PreparingStaffProfileSerializer(profile).data)
+
+    def patch(self, request):
+        if request.user.role != "preparing_staff":
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        profile, _ = PreparingStaffProfile.objects.get_or_create(user=request.user)
+        full_name = request.data.get("full_name")
+        if full_name:
+            profile.full_name = full_name
+            profile.user.first_name = full_name.split(" ")[0]
+            profile.user.last_name = " ".join(full_name.split(" ")[1:]) if len(full_name.split(" ")) > 1 else ""
+            profile.user.save(update_fields=["first_name", "last_name"])
+            profile.save(update_fields=["full_name"])
+        return Response(PreparingStaffProfileSerializer(profile).data)

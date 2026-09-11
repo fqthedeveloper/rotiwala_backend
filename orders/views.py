@@ -488,43 +488,45 @@ class ManagerOrdersView(APIView):
 
     def get(self, request):
 
-        if request.user.role != "manager":
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
             return Response(
                 {"error": "Permission denied"},
                 status=403
             )
 
-        manager_shop = (
-            request.user
-            .manager_profile
-            .shop
-        )
-
-        selected_date = request.GET.get(
-            "date"
-        )
-
-        orders = Order.objects.filter(
-            shop=manager_shop
-        )
-
-        if selected_date:
-
-            orders = orders.filter(
-                ordered_at__date=selected_date
-            )
-
+        if request.user.role == "super_admin":
+            shop_id = request.GET.get("shop_id")
+            if shop_id:
+                orders = Order.objects.filter(shop_id=shop_id)
+            else:
+                orders = Order.objects.all()
         else:
+            staff_shop = request.user.staff_shop
+            if not staff_shop:
+                return Response(
+                    {"error": "Shop not assigned to staff."},
+                    status=400
+                )
+            orders = Order.objects.filter(shop=staff_shop)
 
+        # Optional filters: order_type, status, date
+        order_type = request.GET.get("order_type")
+        if order_type:
+            orders = orders.filter(order_type=order_type)
+
+        status_filter = request.GET.get("status")
+        if status_filter:
+            statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
+            orders = orders.filter(status__in=statuses)
+
+        selected_date = request.GET.get("date")
+        if selected_date:
+            orders = orders.filter(ordered_at__date=selected_date)
+        elif not status_filter:
             today = timezone.localdate()
+            orders = orders.filter(ordered_at__date=today)
 
-            orders = orders.filter(
-                ordered_at__date=today
-            )
-
-        orders = orders.order_by(
-            "-ordered_at"
-        )
+        orders = orders.order_by("-ordered_at")
 
         serializer = OrderSerializer(
             orders,
@@ -544,7 +546,16 @@ class AcceptOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        order = Order.objects.get(id=pk)
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
+
+        try:
+            order = Order.objects.get(id=pk)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found"}, status=404)
+
+        if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
+            return Response({"error": "Order does not belong to your assigned shop"}, status=403)
 
         # ======================================================
         # Atomic transition: ACCEPTED → PREPARING
@@ -584,7 +595,11 @@ class AcceptOrderView(APIView):
             except Exception as e:
                 logger.warning(f"Order accepted WhatsApp failed: {e}")
 
-        return Response({"message": "Order Accepted"})
+        return Response({
+            "message": "Order Accepted",
+            "status": order.status,
+            "token_number": order.token_number
+        })
 
 
 # ==========================================
@@ -592,46 +607,124 @@ class AcceptOrderView(APIView):
 # ==========================================
 
 class RejectOrderView(APIView):
+    """
+    Manager / Admin Order Cancellation & Rejection:
+    - Allows cancelling online orders in pending, accepted, preparing, or ready state.
+    - If fault_type == 'shop' (e.g. item out of stock, kitchen closed):
+        -> DO NOT deduct customer trust points.
+        -> DO NOT flag customer.
+    - If fault_type == 'customer' (e.g. customer not coming to pickup, unresponsive to calls, fake):
+        -> Deducts customer trust points (default: -15).
+        -> Flags the customer (profile.is_flagged = True).
+        -> Records a CustomerFlag entry with reason and who flagged them.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        reason = request.data.get("reason", "Order rejected")
-        order = Order.objects.get(id=pk)
-        order.status = "rejected"
-        order.rejection_reason = reason
+        from accounts.models import User, CustomerProfile, CustomerFlag
+
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
+
+        try:
+            order = Order.objects.get(id=pk)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found"}, status=404)
+
+        if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
+            return Response({"error": "Order does not belong to your assigned shop"}, status=403)
+
+        if order.status == "collected":
+            return Response({"error": "Completed or delivered orders cannot be cancelled."}, status=400)
+
+        reason = request.data.get("reason", "").strip() or "Order cancelled by manager"
+        fault_type = request.data.get("fault_type")  # "shop" or "customer"
+
+        # If fault_type not explicitly supplied, auto-detect from reason keywords
+        if not fault_type:
+            lower_r = reason.lower()
+            if any(k in lower_r for k in ["not answering", "not respond", "unresponsive", "unreachable", "no-show", "no show", "not coming", "fake", "refused"]):
+                fault_type = "customer"
+            else:
+                fault_type = "shop"
+
+        # Update order status
+        old_status = order.status
+        order.status = "rejected" if old_status == "pending" else "cancelled"
+        prefix = "[SHOP ISSUE]" if fault_type == "shop" else "[CUSTOMER ISSUE]"
+        order.rejection_reason = f"{prefix} {reason}"
         order.save()
         send_order_update(order)
 
-        # Update customer profile (if exists)
-        if order.customer:
-            profile = CustomerProfile.objects.get(user=order.customer)
-            profile.total_rejected_orders += 1
-            profile.trust_score -= 3
-            if profile.trust_score < 50:
+        # Resolve customer
+        customer = order.customer
+        if not customer and order.customer_phone:
+            customer = User.objects.filter(phone=order.customer_phone, role="customer").first()
+
+        points_deducted = 0
+        customer_flagged = False
+
+        if customer:
+            profile, _ = CustomerProfile.objects.get_or_create(
+                user=customer,
+                defaults={"trust_score": 100, "total_orders": 0}
+            )
+            profile.total_cancelled_orders += 1
+
+            if fault_type == "customer":
+                # Customer fault: deduct points & flag
+                penalty = int(request.data.get("penalty_points", 15))
+                profile.trust_score = max(0, profile.trust_score - penalty)
                 profile.is_flagged = True
-            profile.save()
+                profile.save()
+                points_deducted = penalty
+                customer_flagged = True
+
+                # Create audit flag
+                CustomerFlag.objects.create(
+                    customer=customer,
+                    flagged_by=request.user,
+                    reason=f"Order #{order.order_number}: {reason}"
+                )
+            else:
+                # Shop fault (items not available, store issue):
+                # DO NOT deduct trust points! DO NOT flag!
+                profile.save()
 
         # Push notification
-        if order.customer and order.customer.fcm_token:
+        if customer and customer.fcm_token:
+            if fault_type == "shop":
+                title = "Order Cancelled by Restaurant"
+                body = f"Order #{order.order_number} could not be fulfilled: {reason}. We apologize for the inconvenience."
+            else:
+                title = "Order Cancelled"
+                body = f"Order #{order.order_number} was cancelled: {reason}."
             send_push_notification(
-                token=order.customer.fcm_token,
-                title="Order Rejected",
-                body=reason,
-                data={"type": "order", "status": "rejected", "order_id": str(order.id)}
+                token=customer.fcm_token,
+                title=title,
+                body=body,
+                data={"type": "order", "status": order.status, "order_id": str(order.id)}
             )
 
-        # WhatsApp notification to customer
-        if order.customer and order.customer.phone:
+        # WhatsApp notification
+        if customer and customer.phone:
             try:
                 WhatsAppService.send_order_rejected(
-                    customer_phone=order.customer.phone,
+                    customer_phone=customer.phone,
                     order_id=order.order_number,
-                    reason=reason
+                    reason=f"{reason} (Points {'deducted' if points_deducted else 'unaffected'})"
                 )
             except Exception as e:
-                logger.warning(f"Order rejected WhatsApp failed: {e}")
+                logger.warning(f"Order rejection/cancellation WhatsApp failed: {e}")
 
-        return Response({"message": "Order Rejected"})
+        return Response({
+            "message": "Order cancelled successfully",
+            "order_id": order.id,
+            "status": order.status,
+            "fault_type": fault_type,
+            "points_deducted": points_deducted,
+            "customer_flagged": customer_flagged,
+        })
 
 
 class PreparingOrderView(APIView):
@@ -639,8 +732,16 @@ class PreparingOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
 
-        order = Order.objects.get(id=pk)
+        try:
+            order = Order.objects.get(id=pk)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found"}, status=404)
+
+        if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
+            return Response({"error": "Order does not belong to your assigned shop"}, status=403)
 
         order.status = "preparing"
         order.save()
@@ -648,7 +749,9 @@ class PreparingOrderView(APIView):
 
         return Response(
             {
-                "message": "Preparing"
+                "message": "Preparing",
+                "status": "preparing",
+                "token_number": order.token_number
             }
         )
 
@@ -661,7 +764,16 @@ class ReadyOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        order = Order.objects.get(id=pk)
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
+
+        try:
+            order = Order.objects.get(id=pk)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found"}, status=404)
+
+        if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
+            return Response({"error": "Order does not belong to your assigned shop"}, status=403)
 
         # Mark as READY
         order.status = "ready"
@@ -708,7 +820,11 @@ class ReadyOrderView(APIView):
             except Exception as e:
                 logger.warning(f"Order ready WhatsApp failed: {e}")
 
-        return Response({"message": "Order Ready"})
+        return Response({
+            "message": "Order Ready",
+            "status": "ready",
+            "token_number": order.token_number
+        })
 
 
 class CollectedOrderView(APIView):
@@ -716,17 +832,29 @@ class CollectedOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
+        if request.user.role not in ["manager", "preparing_staff", "delivery_boy", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
 
-        order = Order.objects.get(id=pk)
+        try:
+            order = Order.objects.get(id=pk)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found"}, status=404)
 
+        if request.user.role not in ["super_admin", "delivery_boy"] and request.user.staff_shop != order.shop:
+            return Response({"error": "Order does not belong to your assigned shop"}, status=403)
+
+        # If payment is not marked paid yet, allow setting paid if requested
         if order.payment_status != "paid":
-
-            return Response(
-                {
-                    "error": "Payment not received"
-                },
-                status=400
-            )
+            if request.data.get("mark_as_paid"):
+                order.payment_status = "paid"
+                order.paid_at = timezone.now()
+            else:
+                return Response(
+                    {
+                        "error": "Payment not received"
+                    },
+                    status=400
+                )
 
         order.status = "collected"
         order.collected_at = timezone.now()
@@ -757,42 +885,140 @@ class CollectedOrderView(APIView):
 
 
 # ==========================================
-# CANCEL ORDER VIEW (UPDATED WITH WHATSAPP)
+# ==========================================
+# CANCEL ORDER VIEW (ONLINE & MANAGER WALKIN)
 # ==========================================
 
 class CancelOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        order = Order.objects.get(id=pk, customer=request.user)
-        if order.status not in ["pending", "accepted"]:
-            return Response({"error": "Cannot cancel"}, status=400)
+        try:
+            order = Order.objects.get(id=pk)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found"}, status=404)
+
+        # ----------------------------------------------------
+        # Customer Cancelling Online Order
+        # ----------------------------------------------------
+        if request.user.role == "customer":
+            if order.customer != request.user:
+                return Response({"error": "You cannot cancel another user's order"}, status=403)
+
+            if order.order_type == "walkin":
+                return Response({"error": "Walk-In orders cannot be cancelled by online customers."}, status=400)
+
+            # Strict rule: Online orders can ONLY be cancelled before acceptance (pending only)
+            if order.status != "pending":
+                return Response({
+                    "error": "Online orders can only be cancelled before they are accepted by the restaurant."
+                }, status=400)
+
+            reason = request.data.get("reason", "Cancelled by customer")
+            order.status = "cancelled"
+            order.rejection_reason = reason
+            order.save()
+            send_order_update(order)
+
+            # Update customer profile
+            try:
+                profile = CustomerProfile.objects.get(user=request.user)
+                profile.total_cancelled_orders += 1
+                profile.trust_score -= 10
+                if profile.trust_score < 50:
+                    profile.is_flagged = True
+                profile.save()
+            except CustomerProfile.DoesNotExist:
+                pass
+
+            # Notify manager via WhatsApp
+            manager = User.objects.filter(role="manager", manager_profile__shop=order.shop).first()
+            if manager and manager.phone:
+                try:
+                    WhatsAppService.send_manager_order_cancelled(
+                        manager_phone=manager.phone,
+                        order_id=order.order_number,
+                        customer_name=order.customer_name
+                    )
+                except Exception as e:
+                    logger.warning(f"Manager cancellation WhatsApp failed: {e}")
+
+            return Response({"message": "Order Cancelled", "status": order.status})
+
+        # ----------------------------------------------------
+        # Manager Cancelling Walk-In Order Before Delivery
+        # ----------------------------------------------------
+        elif request.user.role in ["manager", "super_admin"]:
+            if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
+                return Response({"error": "Order does not belong to your assigned shop"}, status=403)
+
+            if order.order_type != "walkin":
+                return Response({
+                    "error": "Manager direct cancellation is only permitted for Walk-In orders. For online orders, use Reject Order before acceptance."
+                }, status=400)
+
+            if order.status in ["collected", "cancelled", "rejected"]:
+                return Response({
+                    "error": f"Cannot cancel a walk-in order that is already {order.status}."
+                }, status=400)
+
+            reason = request.data.get("reason", "").strip()
+            if not reason:
+                return Response({
+                    "error": "Please provide a purpose or reason for cancelling this walk-in order."
+                }, status=400)
+
+            order.status = "cancelled"
+            order.rejection_reason = reason
+            order.save()
+            send_order_update(order)
+
+            return Response({
+                "success": True,
+                "message": "Walk-In order cancelled successfully.",
+                "status": order.status,
+                "reason": reason
+            })
+
+        return Response({"error": "Permission denied"}, status=403)
+
+
+class CancelWalkInOrderView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Only managers can cancel walk-in orders."}, status=403)
+
+        try:
+            order = Order.objects.get(id=pk, order_type="walkin")
+        except Order.DoesNotExist:
+            return Response({"error": "Walk-In order not found"}, status=404)
+
+        if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
+            return Response({"error": "Order does not belong to your assigned shop"}, status=403)
+
+        if order.status in ["collected", "cancelled", "rejected"]:
+            return Response({"error": f"Cannot cancel a walk-in order that is already {order.status}."}, status=400)
+
+        reason = request.data.get("reason", "").strip()
+        if not reason:
+            return Response({
+                "error": "Please provide a purpose or reason for cancelling this walk-in order."
+            }, status=400)
 
         order.status = "cancelled"
+        order.rejection_reason = reason
         order.save()
         send_order_update(order)
 
-        # Update customer profile
-        profile = CustomerProfile.objects.get(user=request.user)
-        profile.total_cancelled_orders += 1
-        profile.trust_score -= 10
-        if profile.trust_score < 50:
-            profile.is_flagged = True
-        profile.save()
-
-        # Notify manager via WhatsApp (if order was placed by customer)
-        manager = User.objects.filter(role="manager", manager_profile__shop=order.shop).first()
-        if manager and manager.phone:
-            try:
-                WhatsAppService.send_manager_order_cancelled(
-                    manager_phone=manager.phone,
-                    order_id=order.order_number,
-                    customer_name=order.customer_name
-                )
-            except Exception as e:
-                logger.warning(f"Manager cancellation WhatsApp failed: {e}")
-
-        return Response({"message": "Order Cancelled"})
+        return Response({
+            "success": True,
+            "message": "Walk-In order cancelled successfully.",
+            "status": order.status,
+            "reason": reason,
+            "order": OrderSerializer(order).data
+        })
 
 
 class PaymentReceivedView(APIView):
@@ -966,45 +1192,34 @@ class OrderDetailView(APIView):
         
 
 class ManagerDashboardView(APIView):
-
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
-        shop = request.user.manager_profile.shop
+        if request.user.role == "super_admin":
+            shop_id = request.GET.get("shop_id")
+            shop = Shop.objects.filter(id=shop_id).first() if shop_id else Shop.objects.first()
+        else:
+            shop = request.user.staff_shop
+            if not shop:
+                return Response({"error": "No shop assigned to your account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        today = timezone.localdate()
+        today_orders = Order.objects.filter(shop=shop, ordered_at__date=today)
 
         return Response({
-
-            "pending": Order.objects.filter(
-                shop=shop,
-                status="pending"
-            ).count(),
-
-            "accepted": Order.objects.filter(
-                shop=shop,
-                status="accepted"
-            ).count(),
-
-            "preparing": Order.objects.filter(
-                shop=shop,
-                status="preparing"
-            ).count(),
-
-            "ready": Order.objects.filter(
-                shop=shop,
-                status="ready"
-            ).count(),
-
-            "collected": Order.objects.filter(
-                shop=shop,
-                status="collected"
-            ).count(),
-
-            "today_sales": Order.objects.filter(
-                shop=shop,
-                payment_status="paid"
-            ).count()
-
+            "shop_name": shop.name if shop else "Shop",
+            "shop_id": shop.id if shop else None,
+            "pending": Order.objects.filter(shop=shop, status="pending").count(),
+            "accepted": Order.objects.filter(shop=shop, status="accepted").count(),
+            "preparing": Order.objects.filter(shop=shop, status="preparing").count(),
+            "ready": Order.objects.filter(shop=shop, status="ready").count(),
+            "collected": today_orders.filter(status="collected").count(),
+            "today_sales": today_orders.filter(payment_status="paid").count(),
+            "walkin_today": today_orders.filter(order_type="walkin").count(),
+            "online_today": today_orders.filter(order_type="online").count(),
         })
 
 
@@ -1171,10 +1386,12 @@ def get_or_create_customer(phone, name):
         customer.set_password(clean_phone)  # default password = phone number
         customer.save()
 
-        CustomerProfile.objects.create(
+        CustomerProfile.objects.get_or_create(
             user=customer,
-            trust_score=100,
-            total_orders=0,
+            defaults={
+                "trust_score": 100,
+                "total_orders": 0,
+            }
         )
         return customer, True
 
@@ -1213,7 +1430,7 @@ class CreateWalkInCartView(APIView):
         # Permission
         # ------------------------------------
 
-        if request.user.role != "manager":
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
 
             return Response(
                 {
@@ -1223,18 +1440,19 @@ class CreateWalkInCartView(APIView):
             )
 
         # ------------------------------------
-        # Manager Shop
+        # Staff Shop
         # ------------------------------------
 
-        try:
+        if request.user.role == "super_admin":
+            shop_id = request.data.get("shop_id")
+            shop = Shop.objects.filter(id=shop_id).first()
+        else:
+            shop = request.user.staff_shop
 
-            shop = request.user.manager_profile.shop
-
-        except Exception:
-
+        if not shop:
             return Response(
                 {
-                    "error": "Manager shop not assigned"
+                    "error": "Staff shop not assigned"
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -1390,7 +1608,7 @@ class WalkInCartListView(APIView):
 
     def get(self, request):
 
-        if request.user.role != "manager":
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
 
             return Response(
                 {
@@ -1399,18 +1617,23 @@ class WalkInCartListView(APIView):
                 status=403
             )
 
-        shop = request.user.manager_profile.shop
+        if request.user.role == "super_admin":
+            shop_id = request.GET.get("shop_id")
+            if shop_id:
+                carts = WalkInCart.objects.filter(shop_id=shop_id, status="draft")
+            else:
+                carts = WalkInCart.objects.filter(status="draft")
+        else:
+            shop = request.user.staff_shop
+            if not shop:
+                return Response({"error": "Shop not assigned to staff"}, status=400)
+            carts = WalkInCart.objects.filter(
+                shop=shop,
+                status="draft"
+            )
 
-        carts = WalkInCart.objects.filter(
-
-            shop=shop,
-
-            status="draft"
-
-        ).order_by(
-
+        carts = carts.order_by(
             "-updated_at"
-
         )
 
         serializer = WalkInCartSerializer(
@@ -1881,17 +2104,19 @@ class PlaceWalkInCartView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        # 1. Only managers or super admins can place walk‑in orders
-        if request.user.role not in ["manager", "super_admin"]:
+        # 1. Only managers, preparing staff, or super admins can place walk‑in orders
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
             return Response({"error": "Permission denied"}, status=403)
 
         # 2. Fetch the draft cart
         try:
-            cart = WalkInCart.objects.get(
-                id=pk,
-                manager=request.user if request.user.role == "manager" else None,
-                status="draft"
-            )
+            if request.user.role == "super_admin":
+                cart = WalkInCart.objects.get(id=pk, status="draft")
+            else:
+                user_shop = request.user.staff_shop
+                if not user_shop:
+                    return Response({"error": "Staff shop not assigned"}, status=400)
+                cart = WalkInCart.objects.get(id=pk, shop=user_shop, status="draft")
         except WalkInCart.DoesNotExist:
             return Response({"error": "Draft cart not found"}, status=404)
 
@@ -2079,8 +2304,11 @@ class PlaceWalkInCartView(APIView):
             profile.save()
 
         # ========================================================
-        # 7. Notify frontend & mark cart as placed
+        # 7. Assign Walk-in Token & Notify frontend
         # ========================================================
+        from orders.token_utils import assign_walkin_token
+        assign_walkin_token(order)
+
         send_order_update(order)
 
         cart.status = "placed"
@@ -2093,6 +2321,7 @@ class PlaceWalkInCartView(APIView):
         return Response({
             "success": True,
             "message": "Walk-In Order Created Successfully",
+            "token_number": order.token_number,
             "order": serializer.data,
         })
         
@@ -2115,81 +2344,6 @@ def update_order_total(order):
     )
     
     
-class UpdatePlacedOrderView(APIView):
-
-    permission_classes = [IsAuthenticated]
-
-    EDITABLE_STATUS = [
-        "pending",
-        "accepted",
-        "preparing",
-        "ready",
-    ]
-
-    def patch(self, request, pk):
-
-        if request.user.role != "manager":
-
-            return Response(
-                {
-                    "error": "Permission denied"
-                },
-                status=403
-            )
-
-        try:
-
-            shop = request.user.manager_profile.shop
-
-        except:
-
-            return Response(
-                {
-                    "error": "Manager shop not assigned"
-                },
-                status=400
-            )
-
-        try:
-
-            order = Order.objects.get(
-
-                id=pk,
-
-                shop=shop,
-
-                order_type="walkin"
-
-            )
-
-        except Order.DoesNotExist:
-
-            return Response(
-                {
-                    "error": "Walk-In order not found"
-                },
-                status=404
-            )
-
-        if order.status not in self.EDITABLE_STATUS:
-
-            return Response(
-                {
-                    "error": "This order can no longer be edited."
-                },
-                status=400
-            )
-
-        customer_name = request.data.get(
-            "customer_name",
-            order.customer_name
-        )
-
-        customer_phone = request.data.get(
-            "customer_phone",
-            order.customer_phone
-        )
-
 # ==========================================
 # UPDATE PLACED WALK-IN ORDER
 # ==========================================
@@ -3478,3 +3632,253 @@ class SuperAdminOrderListView(generics.ListAPIView):
         if end_date:
             queryset = queryset.filter(ordered_at__date__lte=end_date)
         return queryset
+
+
+# ============================================================
+# STAFF ORDERS & KITCHEN VIEW
+# ============================================================
+
+class StaffOrdersView(APIView):
+    """
+    Endpoint for kitchen / preparing staff and managers to view live orders for their shop.
+    Supports filtering by status (e.g. ?status=accepted,preparing) and order_type (online/walkin).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        if request.user.role == "super_admin":
+            shop_id = request.GET.get("shop_id")
+            if shop_id:
+                orders = Order.objects.filter(shop_id=shop_id)
+            else:
+                orders = Order.objects.all()
+        else:
+            staff_shop = request.user.staff_shop
+            if not staff_shop:
+                return Response({"error": "No shop assigned to staff."}, status=status.HTTP_400_BAD_REQUEST)
+            orders = Order.objects.filter(shop=staff_shop)
+
+        # Filters
+        order_type = request.GET.get("order_type")
+        if order_type:
+            orders = orders.filter(order_type=order_type)
+
+        status_param = request.GET.get("status")
+        if status_param:
+            statuses = [s.strip() for s in status_param.split(",") if s.strip()]
+            orders = orders.filter(status__in=statuses)
+
+        date_param = request.GET.get("date")
+        if date_param:
+            orders = orders.filter(ordered_at__date=date_param)
+        elif not status_param:
+            today = timezone.localdate()
+            orders = orders.filter(ordered_at__date=today)
+
+        orders = orders.select_related("shop", "customer").prefetch_related("items").order_by("-ordered_at")
+        serializer = OrderSerializer(orders, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ============================================================
+# TOKEN ORDER ACTION VIEW
+# ============================================================
+
+class TokenOrderActionView(APIView):
+    """
+    Allows preparing staff or manager to take quick action on an order using token number or order ID.
+    Actions supported:
+    - ready: mark order as ready (updates display screen, creates delivery parcel if delivery)
+    - complete / deliver / collected: mark order as collected (optionally marking payment as paid)
+    - preparing: mark order as preparing
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.role not in ["manager", "preparing_staff", "super_admin"]:
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        token_number = request.data.get("token_number")
+        order_id = request.data.get("order_id")
+        action = request.data.get("action", "").lower().strip()
+
+        if not token_number and not order_id:
+            return Response(
+                {"error": "Either 'token_number' or 'order_id' is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if action not in ["ready", "complete", "deliver", "collected", "preparing", "accepted"]:
+            return Response(
+                {"error": "Invalid action. Supported: ready, complete, deliver, preparing."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Determine shop
+        if request.user.role == "super_admin":
+            shop_id = request.data.get("shop_id")
+            if not shop_id and not order_id:
+                return Response({"error": "shop_id required for super admin when using token_number."}, status=400)
+            shop = Shop.objects.filter(id=shop_id).first() if shop_id else None
+        else:
+            shop = request.user.staff_shop
+            if not shop:
+                return Response({"error": "No shop assigned to staff."}, status=400)
+
+        # Lookup order
+        if order_id:
+            try:
+                order = Order.objects.get(id=order_id)
+                if shop and order.shop != shop:
+                    return Response({"error": "Order does not belong to your shop."}, status=403)
+            except Order.DoesNotExist:
+                return Response({"error": "Order not found."}, status=404)
+        else:
+            # Lookup by token_number for the shop
+            from delivery.models import get_business_date
+            b_date = get_business_date()
+            orders = Order.objects.filter(
+                shop=shop,
+                token_number=str(token_number).zfill(4) if str(token_number).isdigit() else str(token_number),
+                business_date=b_date
+            )
+            active_order = orders.exclude(status__in=["cancelled", "rejected"]).order_by("-ordered_at").first()
+            if not active_order:
+                active_order = Order.objects.filter(
+                    shop=shop,
+                    token_number=str(token_number),
+                    business_date=b_date
+                ).exclude(status__in=["cancelled", "rejected"]).order_by("-ordered_at").first()
+
+            if not active_order:
+                return Response({"error": f"Active order with token #{token_number} not found for today."}, status=404)
+            order = active_order
+
+        # Execute action
+        if action == "ready":
+            order.status = "ready"
+            order.ready_at = timezone.now()
+            order.save(update_fields=["status", "ready_at"])
+            send_order_update(order)
+
+            # If delivery order, auto-assign
+            if order.delivery_option == "delivery":
+                parcel = create_parcel_for_order(order)
+                if parcel and order.shop.delivery_assignment_mode == "auto":
+                    try:
+                        assignment = auto_assign_delivery(order)
+                        notify_delivery_assignment(assignment)
+                    except Exception as e:
+                        logger.warning(f"Auto-assignment failed in token action: {e}")
+
+            if order.customer and order.customer.fcm_token:
+                send_push_notification(
+                    token=order.customer.fcm_token,
+                    title="Order Ready",
+                    body=f"Order #{order.token_number or order.order_number} is ready for pickup",
+                    data={"type": "order", "status": "ready", "order_id": str(order.id)}
+                )
+
+            return Response({
+                "success": True,
+                "message": f"Order #{order.token_number or order.order_number} is now READY",
+                "status": "ready",
+                "token_number": order.token_number,
+                "order": OrderSerializer(order).data,
+            }, status=status.HTTP_200_OK)
+
+        elif action in ["complete", "deliver", "collected"]:
+            if order.payment_status != "paid":
+                if request.data.get("mark_as_paid", False) or order.payment_method in ["cash", "upi"]:
+                    order.payment_status = "paid"
+                    order.paid_at = timezone.now()
+                else:
+                    return Response({"error": "Payment has not been recorded yet. Provide 'mark_as_paid': true to complete."}, status=400)
+
+            order.status = "collected"
+            order.collected_at = timezone.now()
+            order.save()
+            send_order_update(order)
+
+            if order.customer and order.customer.fcm_token:
+                send_push_notification(
+                    token=order.customer.fcm_token,
+                    title="Order Completed",
+                    body="Thank you! Your order has been delivered/collected.",
+                    data={"type": "order", "status": "collected", "order_id": str(order.id)}
+                )
+
+            return Response({
+                "success": True,
+                "message": f"Order #{order.token_number or order.order_number} has been DELIVERED / COMPLETED",
+                "status": "collected",
+                "token_number": order.token_number,
+                "order": OrderSerializer(order).data,
+            }, status=status.HTTP_200_OK)
+
+        elif action in ["preparing", "accepted"]:
+            order.status = "preparing"
+            if not order.accepted_at:
+                order.accepted_at = timezone.now()
+            order.save(update_fields=["status", "accepted_at"])
+            send_order_update(order)
+
+            return Response({
+                "success": True,
+                "message": f"Order #{order.token_number or order.order_number} is now PREPARING",
+                "status": "preparing",
+                "token_number": order.token_number,
+                "order": OrderSerializer(order).data,
+            }, status=status.HTTP_200_OK)
+
+
+# ============================================================
+# DISPLAY SCREEN VIEWS (CUSTOMER WAITING SCREEN)
+# ============================================================
+
+class DisplayScreenDataView(APIView):
+    """
+    Public/Kiosk JSON API for customer waiting display screen.
+    Returns active tokens grouped into preparing, ready, and recently completed.
+    """
+    permission_classes = []
+
+    def get(self, request):
+        shop_id = request.GET.get("shop_id")
+        if not shop_id and request.user.is_authenticated and hasattr(request.user, "staff_shop") and request.user.staff_shop:
+            shop = request.user.staff_shop
+        elif shop_id:
+            try:
+                shop = Shop.objects.get(id=shop_id)
+            except Shop.DoesNotExist:
+                return Response({"error": "Shop not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            first_shop = Shop.objects.filter(is_active=True).first()
+            if not first_shop:
+                return Response({"error": "No shops available."}, status=status.HTTP_404_NOT_FOUND)
+            shop = first_shop
+
+        from orders.token_utils import get_display_screen_tokens
+        data = get_display_screen_tokens(shop)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+from django.shortcuts import render
+
+class LiveDisplayScreenView(APIView):
+    """
+    Renders the live customer-facing TV display screen HTML dashboard.
+    Can be opened directly on any smart TV, browser, or lobby screen.
+    """
+    permission_classes = []
+
+    def get(self, request, shop_id):
+        try:
+            shop = Shop.objects.get(id=shop_id)
+        except Shop.DoesNotExist:
+            return HttpResponse("Shop not found", status=404, content_type="text/plain")
+
+        return render(request, "orders/display_screen.html", {"shop": shop})

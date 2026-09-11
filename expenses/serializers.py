@@ -63,10 +63,16 @@ class StaffSerializer(serializers.ModelSerializer):
     shop_name = serializers.CharField(source='shop.name', read_only=True)
     total_paid = serializers.SerializerMethodField()
     remaining_salary = serializers.SerializerMethodField()
+    has_kitchen_login = serializers.SerializerMethodField()
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = Staff
         fields = "__all__"
+        extra_kwargs = {
+            'shop': {'required': False},
+        }
 
     def get_total_paid(self, obj):
         from django.db.models import Sum
@@ -77,6 +83,17 @@ class StaffSerializer(serializers.ModelSerializer):
         from django.db.models import Sum
         total = obj.salary_records.aggregate(total=Sum('amount'))['total'] or 0
         return obj.monthly_salary - total
+
+    def get_has_kitchen_login(self, obj):
+        return bool(obj.user and hasattr(obj.user, 'preparing_staff_profile'))
+
+    def create(self, validated_data):
+        validated_data.pop('password', None)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop('password', None)
+        return super().update(instance, validated_data)
 
 
 class StaffSalaryRecordSerializer(serializers.ModelSerializer):

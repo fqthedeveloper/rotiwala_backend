@@ -429,13 +429,45 @@ class StaffListCreateView(generics.ListCreateAPIView):
         user = self.request.user
         if user.role == 'manager':
             shop = user.manager_profile.shop
-            serializer.save(shop=shop)
+            staff = serializer.save(shop=shop)
         else:
             shop_id = self.request.data.get('shop')
             if not shop_id:
                 raise ValidationError({"detail": "shop is required for super admin"})
             shop = get_object_or_404(Shop, id=shop_id)
-            serializer.save(shop=shop)
+            staff = serializer.save(shop=shop)
+
+        # Synchronize/Create kitchen preparing staff login
+        phone = (staff.phone or '').strip()
+        if phone:
+            from accounts.models import User as AccountUser, PreparingStaffProfile
+            raw_password = self.request.data.get('password') or phone
+            account_user = AccountUser.objects.filter(phone=phone).first()
+            if not account_user:
+                account_user = AccountUser.objects.create_user(
+                    username=phone,
+                    phone=phone,
+                    password=raw_password,
+                    role='preparing_staff',
+                    first_name=staff.name.split(' ')[0] if staff.name else '',
+                    last_name=' '.join(staff.name.split(' ')[1:]) if len(staff.name.split(' ')) > 1 else '',
+                    is_active=staff.is_active
+                )
+            else:
+                if raw_password and raw_password != phone:
+                    account_user.set_password(raw_password)
+                    account_user.save()
+
+            profile, _ = PreparingStaffProfile.objects.get_or_create(user=account_user)
+            profile.shop = staff.shop
+            profile.full_name = staff.name
+            profile.phone = phone
+            profile.is_active = staff.is_active
+            profile.save()
+
+            if staff.user != account_user:
+                staff.user = account_user
+                staff.save(update_fields=['user'])
 
 
 class StaffDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -451,6 +483,56 @@ class StaffDetailView(generics.RetrieveUpdateDestroyAPIView):
             except:
                 return Staff.objects.none()
         return Staff.objects.all()
+
+    def perform_update(self, serializer):
+        staff = serializer.save()
+        phone = (staff.phone or '').strip()
+        raw_password = self.request.data.get('password')
+        from accounts.models import User as AccountUser, PreparingStaffProfile
+
+        account_user = staff.user
+        if not account_user and phone:
+            account_user = AccountUser.objects.filter(phone=phone).first()
+            if not account_user:
+                account_user = AccountUser.objects.create_user(
+                    username=phone,
+                    phone=phone,
+                    password=raw_password or phone,
+                    role='preparing_staff',
+                    first_name=staff.name.split(' ')[0] if staff.name else '',
+                    last_name=' '.join(staff.name.split(' ')[1:]) if len(staff.name.split(' ')) > 1 else '',
+                    is_active=staff.is_active
+                )
+            staff.user = account_user
+            staff.save(update_fields=['user'])
+
+        if account_user:
+            account_user.first_name = staff.name.split(' ')[0] if staff.name else ''
+            account_user.last_name = ' '.join(staff.name.split(' ')[1:]) if len(staff.name.split(' ')) > 1 else ''
+            account_user.is_active = staff.is_active
+            if phone and account_user.phone != phone:
+                account_user.phone = phone
+            if raw_password:
+                account_user.set_password(raw_password)
+            account_user.save()
+
+            profile, _ = PreparingStaffProfile.objects.get_or_create(user=account_user)
+            profile.shop = staff.shop
+            profile.full_name = staff.name
+            profile.phone = phone or profile.phone
+            profile.is_active = staff.is_active
+            profile.save()
+
+    def perform_destroy(self, instance):
+        user = instance.user
+        instance.delete()
+        if user and user.role == 'preparing_staff':
+            try:
+                if hasattr(user, 'preparing_staff_profile'):
+                    user.preparing_staff_profile.delete()
+                user.delete()
+            except Exception:
+                pass
 
 
 # -------------------- STAFF SALARY (NEW & IMPROVED) --------------------

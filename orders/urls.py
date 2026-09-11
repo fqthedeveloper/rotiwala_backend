@@ -19,6 +19,7 @@ urlpatterns = [
     # Order status updates
     path('<int:pk>/accept/', AcceptOrderView.as_view(), name='accept-order'),
     path('<int:pk>/reject/', RejectOrderView.as_view(), name='reject-order'),
+    path('<int:pk>/cancel-by-manager/', RejectOrderView.as_view(), name='manager-cancel-online-order'),
     path('<int:pk>/preparing/', PreparingOrderView.as_view(), name='preparing-order'),
     path('<int:pk>/ready/', ReadyOrderView.as_view(), name='ready-order'),
     path('<int:pk>/collected/', CollectedOrderView.as_view(), name='collected-order'),
@@ -42,6 +43,7 @@ urlpatterns = [
     path('walkin/cart/<int:pk>/place/', PlaceWalkInCartView.as_view(), name='place-walkin-cart'),
     
     # Walk-in order management
+    path('walkin/order/<int:pk>/cancel/', CancelWalkInOrderView.as_view(), name='cancel-walkin-order'),
     path('walkin/order/<int:pk>/update/', UpdatePlacedOrderView.as_view(), name='update-placed-order'),
     path('walkin/order/<int:pk>/add-item/', AddPlacedOrderItemView.as_view(), name='add-placed-order-item'),
     path('walkin/order/item/<int:pk>/', UpdatePlacedOrderItemView.as_view(), name='update-placed-order-item'),
@@ -57,4 +59,11 @@ urlpatterns = [
     path('receipt/<int:pk>/view/', ViewReceiptPDFView.as_view(), name='view-receipt-pdf'),
     path('superadmin/orders/', SuperAdminOrderListView.as_view(), name='superadmin-orders'),
 
+    # Kitchen / Preparing Staff endpoints
+    path('staff/', StaffOrdersView.as_view(), name='staff-orders'),
+    path('token-action/', TokenOrderActionView.as_view(), name='token-action'),
+
+    # Customer Waiting Display Screen
+    path('display-screen/', DisplayScreenDataView.as_view(), name='display-screen-data'),
+    path('display/<int:shop_id>/', LiveDisplayScreenView.as_view(), name='live-display-screen'),
 ]

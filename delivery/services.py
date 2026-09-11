@@ -1,6 +1,7 @@
 # delivery/services.py
 
 import math
+import logging
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
@@ -8,6 +9,8 @@ from django.core.exceptions import ValidationError
 from shops.models import Shop
 from orders.models import Order
 from .models import DeliveryBoyProfile, DeliveryAssignment, Parcel, get_business_date
+
+logger = logging.getLogger(__name__)
 
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -37,9 +40,10 @@ def validate_delivery_location(shop, customer_lat, customer_lon):
 def create_parcel_for_order(order):
     if order.delivery_option != 'delivery':
         return None
-    if hasattr(order, 'parcel'):
-        return order.parcel
-    parcel = Parcel.objects.create(order=order, shop=order.shop, status='created')
+    parcel = getattr(order, 'parcel', None) or Parcel.objects.filter(order=order).first()
+    if parcel:
+        return parcel
+    parcel, _ = Parcel.objects.get_or_create(order=order, defaults={'shop': order.shop, 'status': 'created'})
     return parcel
 
 
@@ -47,17 +51,19 @@ def create_parcel_for_order(order):
 #  MANUAL ASSIGNMENT (allowing multiple orders per boy)
 # ============================================================
 
-def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None):
+def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None, assignment_mode='manual'):
     if order.delivery_option != 'delivery':
         raise ValidationError("This order is not a delivery order.")
 
     if order.status != 'ready':
         raise ValidationError(f"Order must be READY to assign. Current status: {order.status}")
 
-    if not hasattr(order, 'parcel'):
-        raise ValidationError("Parcel not created for this order.")
+    parcel = getattr(order, 'parcel', None) or Parcel.objects.filter(order=order).first()
+    if not parcel:
+        parcel = create_parcel_for_order(order)
+        if not parcel:
+            raise ValidationError("Parcel not created for this order.")
 
-    parcel = order.parcel
     if parcel.status in ('picked_up', 'out_for_delivery', 'delivered'):
         raise ValidationError(f"Parcel is already {parcel.status}.")
 
@@ -73,11 +79,10 @@ def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None):
         raise ValidationError("Delivery boy is offline.")
 
     with transaction.atomic():
-        # Close existing assignment for this order (if any)
-        existing = DeliveryAssignment.objects.filter(order=order, status__in=['assigned', 'accepted']).first()
-        if existing:
-            existing.status = 'reassigned'
-            existing.save(update_fields=['status'])
+        # Check if an assignment already exists for this order or parcel (OneToOneField constraint)
+        existing = DeliveryAssignment.objects.filter(order=order).first()
+        if not existing and parcel:
+            existing = DeliveryAssignment.objects.filter(parcel=parcel).first()
 
         # Calculate estimated distance
         if order.delivery_latitude and order.delivery_longitude and order.shop.latitude and order.shop.longitude:
@@ -88,24 +93,52 @@ def assign_delivery_manually(order, delivery_boy_profile, assigned_by=None):
         else:
             estimated_distance = None
 
-        # Create assignment
-        assignment = DeliveryAssignment.objects.create(
-            order=order,
-            parcel=parcel,
-            shop=order.shop,
-            delivery_boy=delivery_boy_profile,
-            assignment_mode='manual',
-            status='assigned',
-            estimated_distance_km=estimated_distance,
-            previous_assignment=existing
-        )
+        if existing:
+            # Update existing assignment to satisfy OneToOneField UNIQUE constraints on order_id and parcel_id
+            existing.delivery_boy = delivery_boy_profile
+            existing.parcel = parcel
+            existing.shop = order.shop
+            existing.assignment_mode = assignment_mode
+            existing.status = 'assigned'
+            existing.estimated_distance_km = estimated_distance
+            existing.assigned_at = timezone.now()
+            existing.accepted_at = None
+            existing.picked_up_at = None
+            existing.out_for_delivery_at = None
+            existing.delivered_at = None
+            existing.save()
+            assignment = existing
+        else:
+            # Create new assignment
+            assignment = DeliveryAssignment.objects.create(
+                order=order,
+                parcel=parcel,
+                shop=order.shop,
+                delivery_boy=delivery_boy_profile,
+                assignment_mode=assignment_mode,
+                status='assigned',
+                estimated_distance_km=estimated_distance,
+            )
 
         # Update parcel status
         parcel.status = 'assigned'
         parcel.save(update_fields=['status'])
 
-        # DON'T set is_available = False. Keep boy available until capacity is reached.
-        # Optionally, update availability based on capacity
+        # Notify assigned delivery boy via WebSocket
+        try:
+            from .consumers import notify_delivery_assignment
+            notify_delivery_assignment(assignment)
+        except Exception as e:
+            logger.warning(f"Could not notify delivery boy via WebSocket: {e}")
+
+        # Broadcast WebSocket order update so manager/kitchen orders update driver info immediately
+        try:
+            from orders.views import send_order_update
+            send_order_update(order)
+        except Exception as e:
+            logger.warning(f"Could not broadcast order update via WebSocket: {e}")
+
+        # Update availability based on capacity
         if not delivery_boy_profile.has_capacity:
             delivery_boy_profile.is_available = False
             delivery_boy_profile.save(update_fields=['is_available'])
@@ -173,24 +206,35 @@ def find_best_delivery_boy(order):
     return scored[0]['boy'] if scored else None
 
 
-def auto_assign_delivery(order):
+def auto_assign_delivery(order, force=False):
     if order.delivery_option != 'delivery':
         raise ValidationError("This order is not a delivery order.")
 
     if order.status != 'ready':
         raise ValidationError(f"Order must be READY to assign. Current status: {order.status}")
 
-    if not hasattr(order, 'parcel'):
-        raise ValidationError("Parcel not created for this order.")
+    # Check if order already has an active assignment with an assigned delivery boy
+    existing = DeliveryAssignment.objects.filter(
+        order=order,
+        status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
+    ).first()
+    if existing and existing.delivery_boy:
+        return existing
 
-    if order.shop.delivery_assignment_mode != 'auto':
+    parcel = getattr(order, 'parcel', None) or Parcel.objects.filter(order=order).first()
+    if not parcel:
+        parcel = create_parcel_for_order(order)
+        if not parcel:
+            raise ValidationError("Parcel not created for this order.")
+
+    if not force and order.shop.delivery_assignment_mode != 'auto':
         raise ValidationError("Automatic assignment is not enabled for this shop.")
 
     best_boy = find_best_delivery_boy(order)
     if not best_boy:
         raise ValidationError("No available delivery boys found.")
 
-    return assign_delivery_manually(order, best_boy)
+    return assign_delivery_manually(order, best_boy, assignment_mode='auto')
 
 
 # ============================================================

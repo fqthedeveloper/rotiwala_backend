@@ -34,6 +34,16 @@ class OrderSerializer(serializers.ModelSerializer):
 
     pickup_display = serializers.SerializerMethodField()
 
+    shop_details = serializers.SerializerMethodField()
+
+    delivery_details = serializers.SerializerMethodField()
+
+    customer_is_flagged = serializers.SerializerMethodField()
+
+    customer_trust_score = serializers.SerializerMethodField()
+
+    customer_flag_reasons = serializers.SerializerMethodField()
+
     class Meta:
         model = Order
         fields = "__all__"
@@ -74,6 +84,69 @@ class OrderSerializer(serializers.ModelSerializer):
             )
 
         return None
+
+    def get_shop_details(self, obj):
+        if not obj.shop:
+            return None
+        return {
+            "id": obj.shop.id,
+            "name": obj.shop.name,
+            "address": obj.shop.address,
+            "phone": getattr(obj.shop, "phone", None),
+            "latitude": float(obj.shop.latitude) if obj.shop.latitude is not None else None,
+            "longitude": float(obj.shop.longitude) if obj.shop.longitude is not None else None,
+            "opening_time": str(obj.shop.opening_time) if getattr(obj.shop, "opening_time", None) else None,
+            "closing_time": str(obj.shop.closing_time) if getattr(obj.shop, "closing_time", None) else None,
+        }
+
+    def get_delivery_details(self, obj):
+        try:
+            da = getattr(obj, "delivery_assignment", None)
+            if da and da.delivery_boy:
+                boy = da.delivery_boy
+                return {
+                    "status": da.status,
+                    "delivery_boy_name": boy.full_name or (boy.user.get_full_name() if boy.user else ""),
+                    "delivery_boy_phone": boy.phone or (boy.user.phone if boy.user else ""),
+                    "latitude": float(boy.current_latitude) if boy.current_latitude is not None else None,
+                    "longitude": float(boy.current_longitude) if boy.current_longitude is not None else None,
+                }
+        except Exception:
+            pass
+        return None
+
+    def _resolve_customer(self, obj):
+        if obj.customer:
+            return obj.customer
+        if obj.customer_phone:
+            from accounts.models import User
+            return User.objects.filter(phone=obj.customer_phone, role="customer").first()
+        return None
+
+    def get_customer_is_flagged(self, obj):
+        customer = self._resolve_customer(obj)
+        if customer:
+            from accounts.models import CustomerProfile
+            prof = CustomerProfile.objects.filter(user=customer).first()
+            if prof:
+                return bool(prof.is_flagged)
+        return False
+
+    def get_customer_trust_score(self, obj):
+        customer = self._resolve_customer(obj)
+        if customer:
+            from accounts.models import CustomerProfile
+            prof = CustomerProfile.objects.filter(user=customer).first()
+            if prof:
+                return prof.trust_score
+        return 100
+
+    def get_customer_flag_reasons(self, obj):
+        customer = self._resolve_customer(obj)
+        if customer:
+            from accounts.models import CustomerFlag
+            return list(CustomerFlag.objects.filter(customer=customer).order_by("-created_at").values_list("reason", flat=True)[:5])
+        return []
 
 
 # ==========================================
