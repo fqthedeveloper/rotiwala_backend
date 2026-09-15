@@ -7,10 +7,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.core.exceptions import ValidationError
 from rest_framework.generics import RetrieveAPIView
 from django.utils import timezone
 import re
+import urllib.parse
 
 from orders.models import Order
 from shops.models import Shop
@@ -399,9 +401,71 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
 
         try:
             assignment = confirm_delivery(assignment, delivery_boy)
-            return Response(DeliveryAssignmentSerializer(assignment).data)
+            return Response(DeliveryAssignmentSerializer(assignment, context={'request': request}).data)
         except ValidationError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='collect-payment', parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def collect_payment_hyphen(self, request, pk=None):
+        return self._collect_payment_handler(request)
+
+    @action(detail=True, methods=['post'], url_path='collect_payment', parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def collect_payment(self, request, pk=None):
+        return self._collect_payment_handler(request)
+
+    def _collect_payment_handler(self, request):
+        assignment = self.get_object()
+        user = request.user
+
+        if user.role == 'delivery_boy':
+            if assignment.delivery_boy.user != user:
+                return Response({'error': 'This assignment is not for you.'}, status=status.HTTP_403_FORBIDDEN)
+        elif user.role not in ['manager', 'super_admin']:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        amount = request.data.get('amount')
+        payment_mode = request.data.get('payment_mode', 'cash')
+        payment_proof = request.FILES.get('payment_proof')
+        notes = request.data.get('notes', '')
+
+        with transaction.atomic():
+            assignment.is_paid = True
+            assignment.payment_mode = payment_mode
+            if amount:
+                try:
+                    assignment.collected_amount = float(amount)
+                except (ValueError, TypeError):
+                    assignment.collected_amount = assignment.order.total_amount
+            else:
+                assignment.collected_amount = assignment.order.total_amount
+
+            assignment.payment_collected_at = timezone.now()
+            if payment_proof:
+                assignment.payment_proof = payment_proof
+            if notes:
+                assignment.payment_notes = str(notes)[:255]
+            assignment.save()
+
+            order = assignment.order
+            order.payment_status = 'paid'
+            order.payment_method = payment_mode
+            order.paid_at = timezone.now()
+            if payment_proof:
+                order.payment_proof = payment_proof
+            update_order_fields = ['payment_status', 'payment_method', 'paid_at']
+            if payment_proof:
+                update_order_fields.append('payment_proof')
+            order.save(update_fields=update_order_fields)
+
+        serializer = DeliveryAssignmentSerializer(assignment, context={'request': request})
+        return Response({
+            'message': f'Successfully collected ₹{assignment.collected_amount} via {payment_mode.upper()}.',
+            'assignment': serializer.data,
+            'is_paid': True,
+            'payment_mode': payment_mode,
+            'collected_amount': str(assignment.collected_amount),
+            'payment_proof': serializer.data.get('payment_proof'),
+        }, status=status.HTTP_200_OK)
 
 
 # ============================================================
@@ -662,6 +726,14 @@ class OrderTrackingView(RetrieveAPIView):
 
         boy = assignment.delivery_boy
         order = assignment.order
+        shop = order.shop
+
+        upi_id = getattr(shop, 'upi_id', None) or 'rotiwala@upi'
+        if getattr(shop, 'upi_qr_image', None) and bool(shop.upi_qr_image):
+            shop_qr_url = request.build_absolute_uri(shop.upi_qr_image.url)
+        else:
+            upi_payload = f"upi://pay?pa={upi_id}&pn={shop.name}&am={order.total_amount}&cu=INR"
+            shop_qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={urllib.parse.quote(upi_payload)}"
 
         data = {
             'order_id': order.id,
@@ -676,14 +748,24 @@ class OrderTrackingView(RetrieveAPIView):
                 'last_location_at': boy.last_location_at,
             },
             'shop': {
-                'latitude': str(order.shop.latitude) if order.shop.latitude else None,
-                'longitude': str(order.shop.longitude) if order.shop.longitude else None,
-                'name': order.shop.name,
+                'id': shop.id,
+                'latitude': str(shop.latitude) if shop.latitude else None,
+                'longitude': str(shop.longitude) if shop.longitude else None,
+                'name': shop.name,
+                'upi_id': upi_id,
+                'upi_qr_image': shop_qr_url,
             },
             'customer_location': {
                 'latitude': str(order.delivery_latitude) if order.delivery_latitude else None,
                 'longitude': str(order.delivery_longitude) if order.delivery_longitude else None,
                 'address': order.delivery_address,
+            },
+            'payment': {
+                'total_amount': str(order.total_amount),
+                'payment_method': order.payment_method,
+                'payment_status': order.payment_status,
+                'is_paid': assignment.is_paid or order.payment_status == 'paid',
+                'payment_proof': request.build_absolute_uri(assignment.payment_proof.url) if assignment.payment_proof else None,
             },
         }
         return Response(data)

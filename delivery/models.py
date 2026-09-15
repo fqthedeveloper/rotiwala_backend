@@ -187,6 +187,14 @@ class DeliveryAssignment(models.Model):
     estimated_distance_km = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     actual_distance_km = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
+    # Payment collection & verification
+    is_paid = models.BooleanField(default=False)
+    payment_mode = models.CharField(max_length=20, choices=(('cash', 'Cash'), ('upi', 'UPI')), default='cash')
+    collected_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    payment_collected_at = models.DateTimeField(null=True, blank=True)
+    payment_proof = models.ImageField(upload_to='delivery/payment_proofs/', null=True, blank=True)
+    payment_notes = models.CharField(max_length=255, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

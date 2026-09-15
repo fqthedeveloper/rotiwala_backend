@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -1178,19 +1179,26 @@ class SendPasswordResetOTPView(APIView):
         cache_key = f"password_reset_{phone}"
         cache.set(cache_key, otp, timeout=300)
 
+        whatsapp_sent = False
         try:
             WhatsAppService.send_otp(phone, str(otp))
+            whatsapp_sent = True
         except Exception as e:
             logger.error(f"Failed to send password reset OTP: {e}")
-            return Response(
-                {"error": "Failed to send OTP. Please try again."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            if not getattr(settings, 'DEBUG', False):
+                return Response(
+                    {"error": "Failed to send OTP. Please try again."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
 
-        return Response(
-            {"message": "OTP sent to your registered phone number."},
-            status=status.HTTP_200_OK
-        )
+        resp_data = {
+            "message": "OTP sent to your registered phone number." if whatsapp_sent else "OTP generated successfully (WhatsApp disabled in dev mode).",
+        }
+        if getattr(settings, 'DEBUG', False):
+            resp_data["dev_otp"] = str(otp)
+            print(f"[DEV OTP] Password Reset OTP for {phone}: {otp}")
+
+        return Response(resp_data, status=status.HTTP_200_OK)
 
 
 class VerifyPasswordResetOTPView(APIView):

@@ -200,6 +200,13 @@ class Order(models.Model):
         help_text="Delivery fee if applicable"
     )
 
+    payment_proof = models.ImageField(
+        upload_to="orders/payment_proofs/",
+        blank=True,
+        null=True,
+        help_text="Customer UPI or payment transaction proof photo"
+    )
+
 
     ordered_at = models.DateTimeField(
         auto_now_add=True

@@ -55,6 +55,21 @@ class Shop(models.Model):
         null=True
     )
 
+    upi_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        default="rotiwala@upi",
+        help_text="Shop UPI Virtual Payment Address (e.g. shop@okhdfcbank)"
+    )
+
+    upi_qr_image = models.ImageField(
+        upload_to="shops/upi_qr/",
+        blank=True,
+        null=True,
+        help_text="Shop static or dynamic UPI QR Code Image"
+    )
+
     opening_time = models.TimeField(
         blank=True,
         null=True

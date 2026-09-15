@@ -81,6 +81,11 @@ class DeliveryAssignmentSerializer(serializers.ModelSerializer):
     shop_code = serializers.CharField(source='shop.shop_code', read_only=True)
     parcel_number = serializers.CharField(source='parcel.parcel_number', read_only=True, allow_null=True)
 
+    shop_name = serializers.CharField(source='shop.name', read_only=True)
+    shop_upi_id = serializers.CharField(source='shop.upi_id', read_only=True, allow_null=True)
+    shop_upi_qr_image = serializers.SerializerMethodField()
+    payment_proof = serializers.SerializerMethodField()
+
     # 🔹 ADD THESE CUSTOMER & DELIVERY FIELDS FROM ORDER
     customer_name = serializers.CharField(source='order.customer_name', read_only=True)
     customer_phone = serializers.CharField(source='order.customer_phone', read_only=True)
@@ -95,12 +100,16 @@ class DeliveryAssignmentSerializer(serializers.ModelSerializer):
         model = DeliveryAssignment
         fields = [
             'id', 'order', 'order_number', 'parcel', 'parcel_number',
-            'shop', 'shop_code', 'delivery_boy', 'delivery_boy_name',
-            'delivery_boy_phone', 'assignment_mode', 'status',
-            # 🔹 INCLUDE NEW FIELDS IN FIELDS ARRAY
+            'shop', 'shop_code', 'shop_name', 'shop_upi_id', 'shop_upi_qr_image',
+            'delivery_boy', 'delivery_boy_name', 'delivery_boy_phone',
+            'assignment_mode', 'status',
+            # 🔹 INCLUDE CUSTOMER & DELIVERY FIELDS
             'customer_name', 'customer_phone', 'delivery_address',
             'delivery_latitude', 'delivery_longitude',
             'total_amount', 'payment_method', 'payment_status',
+            # 🔹 PAYMENT COLLECTION FIELDS
+            'is_paid', 'payment_mode', 'collected_amount', 'payment_collected_at',
+            'payment_proof', 'payment_notes',
             'assigned_at', 'accepted_at', 'picked_up_at',
             'out_for_delivery_at', 'delivered_at',
             'estimated_distance_km', 'actual_distance_km',
@@ -110,6 +119,28 @@ class DeliveryAssignmentSerializer(serializers.ModelSerializer):
             'assigned_at', 'created_at', 'updated_at',
             'estimated_distance_km', 'actual_distance_km'
         ]
+
+    def get_shop_upi_qr_image(self, obj):
+        request = self.context.get('request')
+        if obj.shop and obj.shop.upi_qr_image:
+            if request:
+                return request.build_absolute_uri(obj.shop.upi_qr_image.url)
+            return obj.shop.upi_qr_image.url
+
+        upi_id = getattr(obj.shop, 'upi_id', None) or 'rotiwala@upi'
+        shop_name = getattr(obj.shop, 'name', 'Roti Wala')
+        amount = str(obj.order.total_amount) if obj.order else ''
+        import urllib.parse
+        upi_string = f"upi://pay?pa={upi_id}&pn={shop_name}&am={amount}&cu=INR"
+        return f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={urllib.parse.quote(upi_string)}"
+
+    def get_payment_proof(self, obj):
+        request = self.context.get('request')
+        if obj.payment_proof:
+            if request:
+                return request.build_absolute_uri(obj.payment_proof.url)
+            return obj.payment_proof.url
+        return None
         
 
 class DeliveryLocationSerializer(serializers.ModelSerializer):
