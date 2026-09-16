@@ -662,36 +662,34 @@ class CustomerListView(generics.ListAPIView):
         queryset = User.objects.filter(role='customer').select_related('customerprofile').prefetch_related('customer_flags')
 
         if user.role == 'super_admin':
-            # Apply search and filters
-            search = self.request.query_params.get('search')
-            if search:
-                queryset = queryset.filter(
-                    Q(username__icontains=search) |
-                    Q(phone__icontains=search) |
-                    Q(email__icontains=search) |
-                    Q(first_name__icontains=search) |
-                    Q(last_name__icontains=search)
-                )
-            is_active = self.request.query_params.get('is_active')
-            if is_active is not None:
-                queryset = queryset.filter(is_active=is_active.lower() == 'true')
-            is_flagged = self.request.query_params.get('is_flagged')
-            if is_flagged is not None:
-                queryset = queryset.filter(customerprofile__is_flagged=is_flagged.lower() == 'true')
-            return queryset.order_by('-date_joined')
-
+            pass
         elif user.role == 'manager':
-            shop = getattr(user.manager_profile, 'shop', None)
+            shop = getattr(getattr(user, 'manager_profile', None), 'shop', None)
             if shop:
                 customer_ids = Order.objects.filter(shop=shop).values_list('customer_id', flat=True).distinct()
                 queryset = queryset.filter(id__in=customer_ids)
             else:
-                queryset = queryset.none()
-            # optional search/filter ...
-            return queryset.order_by('-date_joined')
+                return queryset.none()
+        else:
+            return queryset.none()
 
-        # Customer role: no list
-        return queryset.none()
+        # Apply search and filters for both roles
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(username__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(email__icontains=search) |
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search)
+            )
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+        is_flagged = self.request.query_params.get('is_flagged')
+        if is_flagged is not None:
+            queryset = queryset.filter(customerprofile__is_flagged=is_flagged.lower() == 'true')
+        return queryset.order_by('-date_joined')
 
 
 class CustomerSelfProfileView(generics.RetrieveUpdateAPIView):

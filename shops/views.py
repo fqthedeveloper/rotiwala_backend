@@ -57,17 +57,26 @@ class ShopDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         """
-        Extra safety check: Ensure manager can only update their own shop.
+        Extra safety check: Ensure manager can only update their own shop,
+        and cannot update UPI details (only super admin can update UPI details).
         """
+        from rest_framework.exceptions import PermissionDenied
         user = self.request.user
         if user.role == 'manager':
+            if (
+                'upi_id' in serializer.validated_data
+                or 'upi_qr_image' in serializer.validated_data
+                or 'upi_id' in self.request.data
+                or 'upi_qr_image' in self.request.FILES
+            ):
+                raise PermissionDenied('Only admin can update UPI details.')
             try:
                 if user.manager_profile.shop != self.get_object():
-                    return Response({'error': 'You can only update your own shop.'},
-                                    status=status.HTTP_403_FORBIDDEN)
-            except:
-                return Response({'error': 'Manager profile not found.'},
-                                status=status.HTTP_403_FORBIDDEN)
+                    raise PermissionDenied('You can only update your own shop.')
+            except PermissionDenied:
+                raise
+            except Exception:
+                raise PermissionDenied('Manager profile not found.')
         serializer.save()
 
 

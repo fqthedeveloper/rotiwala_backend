@@ -2403,8 +2403,6 @@ class UpdatePlacedOrderView(APIView):
 
                 shop=shop,
 
-                order_type="walkin",
-
             )
 
         except Order.DoesNotExist:
@@ -2412,7 +2410,7 @@ class UpdatePlacedOrderView(APIView):
             return Response(
 
                 {
-                    "error": "Walk-In order not found"
+                    "error": "Order not found"
                 },
 
                 status=status.HTTP_404_NOT_FOUND
@@ -2526,9 +2524,19 @@ class UpdatePlacedOrderView(APIView):
 
         )
 
-        order.payment_method = payment_method
+        if payment_method:
+            clean_pm = str(payment_method).lower().strip()
+            if clean_pm in ["cash", "upi"]:
+                order.payment_method = clean_pm
 
-        order.payment_status = payment_status
+        if payment_status:
+            clean_ps = str(payment_status).lower().strip()
+            if clean_ps in ["unpaid", "paid"]:
+                order.payment_status = clean_ps
+                if clean_ps == "paid" and not order.paid_at:
+                    order.paid_at = timezone.now()
+                elif clean_ps == "unpaid":
+                    order.paid_at = None
 
         order.notes = notes
         
@@ -2604,6 +2612,7 @@ class UpdatePlacedOrderView(APIView):
 
             )
         order.save()
+
         if customer:
 
             CustomerProfile.objects.get_or_create(
@@ -2619,17 +2628,19 @@ class UpdatePlacedOrderView(APIView):
                 }
 
             )
-            send_order_update(
+
+        send_order_update(
 
             order
 
         )
-        
-            serializer = OrderSerializer(
+
+        serializer = OrderSerializer(
 
             order
 
         )
+
         return Response(
 
             {
@@ -2687,14 +2698,13 @@ class AddPlacedOrderItemView(APIView):
             order = Order.objects.get(
                 id=pk,
                 shop=shop,
-                order_type="walkin"
             )
 
         except Order.DoesNotExist:
 
             return Response(
                 {
-                    "error": "Walk-In order not found"
+                    "error": "Order not found"
                 },
                 status=404
             )
