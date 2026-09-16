@@ -42,14 +42,16 @@ class DeliveryBoyProfileSerializer(serializers.ModelSerializer):
         assignments = DeliveryAssignment.objects.filter(
             delivery_boy=obj,
             status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
-        )
+        ).order_by('-assigned_at', '-id')
         return [
             {
                 'id': a.id,
-                'order_id': a.order_id, # <-- Ensure this is here
+                'order_id': a.order_id,
                 'order_number': a.order.order_number,
                 'status': a.status,
                 'customer_name': a.order.customer_name,
+                'assigned_at': a.assigned_at,
+                'ordered_at': a.order.ordered_at if a.order else None,
             } for a in assignments
         ]
 

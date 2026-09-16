@@ -201,6 +201,7 @@ class DeliveryAssignment(models.Model):
     previous_assignment = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='next_assignments')
 
     class Meta:
+        ordering = ['-assigned_at', '-id']
         indexes = [
             models.Index(fields=['shop', 'status']),
             models.Index(fields=['delivery_boy', 'status']),

@@ -277,13 +277,13 @@ class DeliveryAssignmentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.role == 'super_admin':
-            return DeliveryAssignment.objects.all()
+            return DeliveryAssignment.objects.all().order_by('-assigned_at', '-id')
         elif user.role == 'manager':
             shop = user.manager_profile.shop
-            return DeliveryAssignment.objects.filter(shop=shop)
+            return DeliveryAssignment.objects.filter(shop=shop).order_by('-assigned_at', '-id')
         elif user.role == 'delivery_boy':
             profile = get_object_or_404(DeliveryBoyProfile, user=user)
-            return DeliveryAssignment.objects.filter(delivery_boy=profile)
+            return DeliveryAssignment.objects.filter(delivery_boy=profile).order_by('-assigned_at', '-id')
         return DeliveryAssignment.objects.none()
 
     @action(detail=False, methods=['post'])
@@ -709,9 +709,9 @@ class ReadyOrdersForDeliveryView(generics.ListAPIView):
             delivery_option='delivery'
         ).exclude(
             delivery_assignment__status__in=['assigned', 'accepted', 'picked_up', 'out_for_delivery']
-        ).select_related('shop')
-        
-        
+        ).select_related('shop').order_by('-ordered_at', '-id')
+
+
 class OrderTrackingView(RetrieveAPIView):
     permission_classes = [IsAuthenticated]
 
@@ -735,29 +735,53 @@ class OrderTrackingView(RetrieveAPIView):
             upi_payload = f"upi://pay?pa={upi_id}&pn={shop.name}&am={order.total_amount}&cu=INR"
             shop_qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={urllib.parse.quote(upi_payload)}"
 
+        # Rider coordinates handling
+        boy_lat = float(boy.current_latitude) if boy.current_latitude is not None else None
+        boy_lng = float(boy.current_longitude) if boy.current_longitude is not None else None
+
+        # Sanitize emulator mock location (longitude < 0 or outside India)
+        if boy_lat is not None and boy_lng is not None:
+            if boy_lng < 0 or boy_lng < 65 or boy_lng > 100 or boy_lat < 5 or boy_lat > 40:
+                if shop and shop.latitude and shop.longitude:
+                    boy_lat = float(shop.latitude)
+                    boy_lng = float(shop.longitude)
+        elif shop and shop.latitude and shop.longitude:
+            boy_lat = float(shop.latitude)
+            boy_lng = float(shop.longitude)
+
+        # Shop coordinates
+        shop_lat = float(shop.latitude) if shop and shop.latitude is not None else None
+        shop_lng = float(shop.longitude) if shop and shop.longitude is not None else None
+
+        # Customer coordinates
+        cust_lat = float(order.delivery_latitude) if order.delivery_latitude is not None else None
+        cust_lng = float(order.delivery_longitude) if order.delivery_longitude is not None else None
+
         data = {
             'order_id': order.id,
             'order_number': order.order_number,
+            'ordered_at': order.ordered_at,
+            'assigned_at': assignment.assigned_at,
             'status': assignment.status,
             'delivery_boy': {
                 'id': boy.id,
                 'full_name': boy.full_name,
                 'phone': boy.phone,
-                'latitude': str(boy.current_latitude) if boy.current_latitude else None,
-                'longitude': str(boy.current_longitude) if boy.current_longitude else None,
+                'latitude': str(boy_lat) if boy_lat is not None else None,
+                'longitude': str(boy_lng) if boy_lng is not None else None,
                 'last_location_at': boy.last_location_at,
             },
             'shop': {
-                'id': shop.id,
-                'latitude': str(shop.latitude) if shop.latitude else None,
-                'longitude': str(shop.longitude) if shop.longitude else None,
-                'name': shop.name,
+                'id': shop.id if shop else None,
+                'latitude': str(shop_lat) if shop_lat is not None else None,
+                'longitude': str(shop_lng) if shop_lng is not None else None,
+                'name': shop.name if shop else 'Shop',
                 'upi_id': upi_id,
                 'upi_qr_image': shop_qr_url,
             },
             'customer_location': {
-                'latitude': str(order.delivery_latitude) if order.delivery_latitude else None,
-                'longitude': str(order.delivery_longitude) if order.delivery_longitude else None,
+                'latitude': str(cust_lat) if cust_lat is not None else None,
+                'longitude': str(cust_lng) if cust_lng is not None else None,
                 'address': order.delivery_address,
             },
             'payment': {
