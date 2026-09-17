@@ -260,7 +260,9 @@ def scan_parcel(qr_token, delivery_boy_profile):
         raise ValidationError(f"Order is not ready for pickup. Status: {parcel.order.status}")
 
     try:
-        assignment = DeliveryAssignment.objects.get(parcel=parcel, status='assigned')
+        assignment = DeliveryAssignment.objects.filter(parcel=parcel, status__in=['assigned', 'accepted']).first()
+        if not assignment:
+            raise ValidationError("This parcel has not been assigned to you or is already processed.")
         if assignment.delivery_boy != delivery_boy_profile:
             raise ValidationError("This parcel is assigned to another delivery boy.")
     except DeliveryAssignment.DoesNotExist:
@@ -276,7 +278,7 @@ def confirm_pickup(assignment, delivery_boy_profile):
     if assignment.delivery_boy != delivery_boy_profile:
         raise ValidationError("You are not assigned to this delivery.")
 
-    if assignment.status != 'assigned':
+    if assignment.status not in ('assigned', 'accepted'):
         raise ValidationError(f"Cannot pickup. Current status: {assignment.status}")
 
     with transaction.atomic():

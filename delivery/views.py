@@ -60,13 +60,13 @@ class DeliveryBoyRequestOTPView(generics.GenericAPIView):
         if not raw_phone:
             return Response({'error': 'Phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Normalize phone variants (with and without +91 / 91)
+        # Normalize phone variants (support 9-13 digits, with/without country code)
         clean_digits = ''.join(filter(str.isdigit, str(raw_phone)))
-        phone_variants = [raw_phone.strip()]
-        if len(clean_digits) == 10:
-            phone_variants.extend([f"+91{clean_digits}", clean_digits, f"91{clean_digits}"])
-        elif len(clean_digits) == 12 and clean_digits.startswith('91'):
-            phone_variants.extend([f"+{clean_digits}", clean_digits[2:], clean_digits])
+        phone_variants = list({raw_phone.strip(), clean_digits, f"+{clean_digits}"})
+        if clean_digits.startswith('91') and len(clean_digits) > 2:
+            phone_variants.extend([clean_digits[2:], f"+{clean_digits}"])
+        else:
+            phone_variants.extend([f"+91{clean_digits}", f"91{clean_digits}"])
 
         # Check if delivery boy exists
         user = User.objects.filter(phone__in=phone_variants, role='delivery_boy').first()
@@ -100,8 +100,8 @@ class DeliveryBoyRequestOTPView(generics.GenericAPIView):
         if not whatsapp_sent and whatsapp_error:
             resp_data['whatsapp_error'] = whatsapp_error
 
-        # In DEBUG mode, return OTP in response for testing
-        if getattr(settings, 'DEBUG', False):
+        # Never leak dev_otp in production unless specifically requested by testing harness
+        if getattr(settings, 'DEBUG', False) and getattr(settings, 'RETURN_DEV_OTP', False):
             resp_data['dev_otp'] = otp_obj.otp_code
 
         # If WhatsApp failed and not in DEBUG, return 500 so frontend knows

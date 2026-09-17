@@ -184,13 +184,13 @@ class DeliveryBoyLoginSerializer(serializers.Serializer):
         if not raw_phone:
             raise serializers.ValidationError("Phone number is required.")
 
-        # Normalize phone variants (with and without +91 / 91)
+        # Normalize phone variants (support 9-13 digits, with/without country code)
         clean_digits = ''.join(filter(str.isdigit, str(raw_phone)))
-        phone_variants = [raw_phone.strip()]
-        if len(clean_digits) == 10:
-            phone_variants.extend([f"+91{clean_digits}", clean_digits, f"91{clean_digits}"])
-        elif len(clean_digits) == 12 and clean_digits.startswith('91'):
-            phone_variants.extend([f"+{clean_digits}", clean_digits[2:], clean_digits])
+        phone_variants = list({raw_phone.strip(), clean_digits, f"+{clean_digits}"})
+        if clean_digits.startswith('91') and len(clean_digits) > 2:
+            phone_variants.extend([clean_digits[2:], f"+{clean_digits}"])
+        else:
+            phone_variants.extend([f"+91{clean_digits}", f"91{clean_digits}"])
 
         # Find delivery boy user
         user = User.objects.filter(phone__in=phone_variants, role='delivery_boy').first()
