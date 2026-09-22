@@ -17,6 +17,8 @@ from io import BytesIO
 from django.core.files.base import ContentFile
 from PIL import Image as PILImage
 
+PILImage.MAX_IMAGE_PIXELS = None
+
 
 class MenuItem(models.Model):
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="menu_items")
@@ -37,6 +39,8 @@ class MenuItem(models.Model):
         if self.image and not getattr(self, '_image_optimized', False):
             try:
                 if hasattr(self.image, 'file'):
+                    if hasattr(self.image, 'seek'):
+                        self.image.seek(0)
                     img = PILImage.open(self.image)
                     max_dim = 1200
                     needs_resize = img.width > max_dim or img.height > max_dim
@@ -49,7 +53,7 @@ class MenuItem(models.Model):
                         output = BytesIO()
                         # Preserve alpha channel for transparent PNGs
                         if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                            img.save(output, format='PNG', optimize=True)
+                            img.save(output, format='PNG', optimize=True, compress_level=6)
                             ext = '.png'
                         else:
                             if img.mode != 'RGB':
@@ -57,9 +61,8 @@ class MenuItem(models.Model):
                             img.save(output, format='JPEG', quality=85, optimize=True)
                             ext = '.jpg'
 
-                        output.seek(0)
                         base_name = os.path.splitext(os.path.basename(self.image.name))[0]
-                        self.image.save(f"{base_name}{ext}", ContentFile(output.read()), save=False)
+                        self.image.save(f"{base_name}{ext}", ContentFile(output.getvalue()), save=False)
                         self._image_optimized = True
             except Exception:
                 pass
