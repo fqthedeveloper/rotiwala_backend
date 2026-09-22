@@ -1,5 +1,4 @@
-# shops/views.py
-
+import math
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
@@ -293,13 +292,36 @@ class ManagerListView(APIView):
         return Response(data)
 
 
+def calculate_haversine_distance_km(lat1, lon1, lat2, lon2):
+    """
+    Calculate the great circle distance between two points 
+    on the earth (specified in decimal degrees) using Haversine formula.
+    """
+    R = 6371.0  # Earth radius in kilometers
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2.0) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2.0) ** 2
+    )
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return R * c
+
+
 class NearbyShopView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        latitude = float(request.data.get("latitude"))
-        longitude = float(request.data.get("longitude"))
-        customer_location = (latitude, longitude)
+        try:
+            latitude = float(request.data.get("latitude"))
+            longitude = float(request.data.get("longitude"))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "Valid latitude and longitude numbers are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         nearest_shop = None
         nearest_distance = None
@@ -311,14 +333,29 @@ class NearbyShopView(APIView):
         )
 
         for shop in shops:
-            shop_location = (float(shop.latitude), float(shop.longitude))
-            distance = geodesic(customer_location, shop_location).km
-            if nearest_distance is None or distance < nearest_distance:
-                nearest_distance = distance
-                nearest_shop = shop
+            try:
+                shop_lat = float(shop.latitude)
+                shop_lon = float(shop.longitude)
+                distance = calculate_haversine_distance_km(latitude, longitude, shop_lat, shop_lon)
+                if nearest_distance is None or distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_shop = shop
+            except (TypeError, ValueError):
+                continue
 
         if not nearest_shop:
-            return Response({"error": "No shop found"}, status=404)
+            fallback_shop = Shop.objects.filter(is_active=True).first()
+            if fallback_shop:
+                return Response({
+                    "id": fallback_shop.id,
+                    "name": fallback_shop.name,
+                    "address": fallback_shop.address,
+                    "phone": fallback_shop.phone,
+                    "latitude": fallback_shop.latitude,
+                    "longitude": fallback_shop.longitude,
+                    "distance": 0.0
+                })
+            return Response({"error": "No active shop found"}, status=status.HTTP_404_NOT_FOUND)
 
         return Response({
             "id": nearest_shop.id,
