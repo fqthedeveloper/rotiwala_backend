@@ -57,7 +57,6 @@ class WhatsAppService:
                 headers=headers,
                 json=payload,
                 timeout=30,
-                verify=False,      # Remove in production
             )
 
             print("STATUS :", resp.status_code)

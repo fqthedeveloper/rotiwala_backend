@@ -48,6 +48,15 @@ class Order(models.Model):
         unique=True
     )
 
+    client_order_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
+        db_index=True,
+        help_text="Client-generated unique UUID for idempotent order placement"
+    )
+
     customer = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,

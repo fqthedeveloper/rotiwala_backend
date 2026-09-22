@@ -34,37 +34,67 @@ from rest_framework import status
 from whatsapp.services import WhatsAppService
 import logging
 
+import re
+
 logger = logging.getLogger(__name__)
+
+PHONE_REGEX = re.compile(r'^\+?[1-9]\d{9,14}$')
 
 # accounts/views.py
 class SendOTPView(APIView):
     permission_classes = []
 
     def post(self, request):
-        phone = request.data.get("phone")
+        phone = str(request.data.get("phone", "")).strip()
         if not phone:
-            return Response({"error": "Phone number required."}, status=400)
+            return Response({"error": "Phone number required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Normalize phone if needed
+        clean_phone = phone if phone.startswith("+") else f"+{phone}"
+        if not PHONE_REGEX.match(clean_phone):
+            return Response({"error": "Invalid phone number format. Please provide a valid number with country code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Rate-limiting: 60-second cooldown per phone
+        cooldown_key = f"otp_cooldown_{clean_phone}"
+        if cache.get(cooldown_key):
+            return Response(
+                {"error": "Please wait 60 seconds before requesting another OTP."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+
+        # Hourly limit: max 5 OTP requests per hour per phone
+        hourly_key = f"otp_hourly_{clean_phone}"
+        hourly_count = cache.get(hourly_key, 0)
+        if hourly_count >= 5:
+            return Response(
+                {"error": "Too many OTP requests for this phone number. Please try again in an hour."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
 
         otp = random.randint(100000, 999999)
-        cache.set(f"otp_{phone}", otp, timeout=300)
+        cache.set(f"otp_{clean_phone}", otp, timeout=300)
+        cache.set(cooldown_key, True, timeout=60)
+        cache.set(hourly_key, hourly_count + 1, timeout=3600)
+        # Reset verify attempts on new OTP
+        cache.delete(f"otp_verify_attempts_{clean_phone}")
 
         try:
-            result = WhatsAppService.send_otp(phone, str(otp))
-            return Response({"message": "OTP sent to your WhatsApp."}, status=200)
+            WhatsAppService.send_otp(clean_phone, str(otp))
+            return Response({"message": "OTP sent to your WhatsApp."}, status=status.HTTP_200_OK)
         except Exception as e:
             error_msg = str(e)
-            # This will now contain the full HTTP error
-            return Response({"error": error_msg}, status=500)
+            logger.error(f"Failed to send OTP to {clean_phone}: {error_msg}")
+            return Response({"error": "Failed to send WhatsApp OTP. Please try again later."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class VerifyOTPView(APIView):
     permission_classes = []
 
     def post(self, request):
-        phone = request.data.get("phone")
-        otp = request.data.get("otp")
-        first_name = request.data.get("first_name", "")
-        last_name = request.data.get("last_name", "")
+        phone = str(request.data.get("phone", "")).strip()
+        otp = str(request.data.get("otp", "")).strip()
+        first_name = request.data.get("first_name", "").strip()
+        last_name = request.data.get("last_name", "").strip()
         password = request.data.get("password")  # optional
 
         if not phone or not otp:
@@ -73,17 +103,39 @@ class VerifyOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        cached_otp = cache.get(f"otp_{phone}")
-        if not cached_otp or str(cached_otp) != str(otp):
+        clean_phone = phone if phone.startswith("+") else f"+{phone}"
+
+        # Brute-force protection: max 5 failed attempts per OTP
+        attempts_key = f"otp_verify_attempts_{clean_phone}"
+        attempts = cache.get(attempts_key, 0)
+        if attempts >= 5:
+            cache.delete(f"otp_{clean_phone}")
             return Response(
-                {"error": "Invalid or expired OTP."},
+                {"error": "Too many incorrect attempts. This OTP has expired for security. Please request a new one."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+
+        cached_otp = cache.get(f"otp_{clean_phone}")
+        if not cached_otp or str(cached_otp) != otp:
+            cache.set(attempts_key, attempts + 1, timeout=300)
+            remaining = 5 - (attempts + 1)
+            msg = "Invalid or expired OTP."
+            if remaining > 0:
+                msg += f" {remaining} attempt(s) remaining."
+            else:
+                cache.delete(f"otp_{clean_phone}")
+                msg = "Too many incorrect attempts. Please request a new OTP."
+            return Response(
+                {"error": msg},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        cache.delete(f"otp_{phone}")
+        # Clear OTP and attempts on success
+        cache.delete(f"otp_{clean_phone}")
+        cache.delete(attempts_key)
 
         try:
-            user = User.objects.get(phone=phone)
+            user = User.objects.get(phone=clean_phone)
             # Login
             refresh = RefreshToken.for_user(user)
             return Response({
@@ -96,8 +148,8 @@ class VerifyOTPView(APIView):
         except User.DoesNotExist:
             # Register new user
             user = User.objects.create_user(
-                username=phone,
-                phone=phone,
+                username=clean_phone,
+                phone=clean_phone,
                 first_name=first_name,
                 last_name=last_name,
                 password=password,
@@ -451,26 +503,43 @@ class TestWhatsAppView(APIView):
             return Response({"error": str(e)}, status=500)
 
 class SaveFCMTokenView(APIView):
-
-    permission_classes = [
-        IsAuthenticated
-    ]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        token = request.data.get("token")
+        if token:
+            token = str(token).strip()
+            # Dissociate this device token from any other accounts (e.g. previous logins on shared device)
+            User.objects.filter(fcm_token=token).exclude(id=request.user.id).update(fcm_token=None)
+            request.user.fcm_token = token
+            request.user.save(update_fields=['fcm_token'])
+        return Response({"message": "FCM Token Saved"})
 
-        token = request.data.get(
-            "token"
-        )
 
-        request.user.fcm_token = token
+class CustomerLogoutView(APIView):
+    """
+    Clears server-side device FCM token and blacklists the refresh token if supplied.
+    """
+    permission_classes = [IsAuthenticated]
 
-        request.user.save()
+    def post(self, request):
+        try:
+            # Clear user's registered FCM token
+            request.user.fcm_token = None
+            request.user.save(update_fields=['fcm_token'])
 
-        return Response({
+            # Blacklist refresh token if provided
+            refresh_token = request.data.get("refresh")
+            if refresh_token:
+                try:
+                    token = RefreshToken(refresh_token)
+                    token.blacklist()
+                except Exception:
+                    pass
 
-            "message":
-            "FCM Token Saved"
-        })
+            return Response({"success": True, "message": "Logged out successfully."}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ManagerListView(APIView):

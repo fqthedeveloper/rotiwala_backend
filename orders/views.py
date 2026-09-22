@@ -102,8 +102,15 @@ class PlaceOrderView(APIView):
     @transaction.atomic
     def post(self, request):
         # ============================================
-        # 1. Validate basic inputs
+        # 1. Validate basic inputs & Idempotency
         # ============================================
+        client_order_id = request.data.get("client_order_id")
+        if client_order_id:
+            client_order_id = str(client_order_id).strip()
+            existing_order = Order.objects.filter(client_order_id=client_order_id, customer=request.user).first()
+            if existing_order:
+                return Response(OrderSerializer(existing_order).data, status=status.HTTP_200_OK)
+
         shop_id = request.data.get("shop_id")
         if not shop_id:
             return Response({"error": "Shop ID required"}, status=400)
@@ -118,9 +125,22 @@ class PlaceOrderView(APIView):
         except Cart.DoesNotExist:
             return Response({"error": "Cart not found"}, status=400)
 
-        cart_items = CartItem.objects.filter(cart=cart)
+        cart_items = CartItem.objects.filter(cart=cart).select_related('menu_item')
         if not cart_items.exists():
             return Response({"error": "Cart Empty"}, status=400)
+
+        # Validate each cart item: availability, shop alignment, valid quantity
+        for item in cart_items:
+            if not item.quantity or item.quantity <= 0 or item.quantity > 99:
+                return Response({"error": f"Invalid quantity ({item.quantity}) for item '{item.menu_item.name}'."}, status=status.HTTP_400_BAD_REQUEST)
+            if not item.menu_item.is_available or not getattr(item.menu_item, 'is_active', True):
+                return Response({
+                    "error": f"Item '{item.menu_item.name}' is currently unavailable. Please remove it from your cart."
+                }, status=status.HTTP_400_BAD_REQUEST)
+            if item.menu_item.shop_id != shop.id:
+                return Response({
+                    "error": f"Item '{item.menu_item.name}' belongs to another branch. Please clear your cart and select items from {shop.name}."
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         delivery_option = request.data.get("delivery_option", "pickup")
         cart_subtotal = sum(
@@ -199,9 +219,24 @@ class PlaceOrderView(APIView):
                     {"error": "Shop location is not set, cannot deliver"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
+            # Safely validate coordinates format and range
+            try:
+                shop_lat_f = float(shop.latitude)
+                shop_lng_f = float(shop.longitude)
+                deliv_lat_f = float(delivery_lat)
+                deliv_lng_f = float(delivery_lng)
+                if not (-90.0 <= deliv_lat_f <= 90.0 and -180.0 <= deliv_lng_f <= 180.0):
+                    raise ValueError("Coordinates out of range")
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "Invalid latitude or longitude coordinates provided for delivery."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             distance = haversine(
-                float(shop.latitude), float(shop.longitude),
-                float(delivery_lat), float(delivery_lng)
+                shop_lat_f, shop_lng_f,
+                deliv_lat_f, deliv_lng_f
             )
             # Use shop's radius, fallback to 2.0 if not set
             max_distance = float(shop.delivery_radius_km or 2.0)
@@ -271,10 +306,13 @@ class PlaceOrderView(APIView):
             except Discount.DoesNotExist:
                 return Response({"error": "Discount not found"}, status=400)
         elif promotion_type == "coupon" and coupon_code:
-            try:
-                selected_coupon = Coupon.objects.get(code=coupon_code, status='active')
-            except Coupon.DoesNotExist:
-                return Response({"error": "Coupon not found"}, status=400)
+            selected_coupon = Coupon.objects.filter(
+                code__iexact=coupon_code.strip(),
+                shop=shop,
+                status='active'
+            ).first()
+            if not selected_coupon:
+                return Response({"error": f"Coupon '{coupon_code}' is invalid or expired for this branch."}, status=status.HTTP_400_BAD_REQUEST)
 
         # ============================================
         # 2. Estimate preparation time (unchanged)
@@ -304,30 +342,39 @@ class PlaceOrderView(APIView):
         ):
             delivery_fee = shop.delivery_fee or Decimal("0.00")
 
-        order = Order.objects.create(
-            order_number=generate_online_order_number(shop),
-            customer=request.user,
-            shop=shop,
-            customer_name=request.user.get_full_name() or request.user.username or request.user.phone,
-            customer_phone=request.user.phone,
-            payment_method=payment_method,
-            payment_status="unpaid",
-            order_type="online",
-            pickup_type=pickup_type,
-            pickup_time=parsed_pickup_time,
-            notes=notes,
-            status="pending",
-            estimated_minutes=estimated_minutes,
-            estimated_ready_time=estimated_ready_time,
-            pickup_by_other_person=pickup_by_other_person,
-            pickup_person_name=pickup_person_name,
-            pickup_person_phone=pickup_person_phone,
-            delivery_option=delivery_option,
-            delivery_address=delivery_address if delivery_option == "delivery" else "",
-            delivery_latitude=delivery_lat if delivery_option == "delivery" else None,
-            delivery_longitude=delivery_lng if delivery_option == "delivery" else None,
-            delivery_fee=delivery_fee,
-        )
+        try:
+            order = Order.objects.create(
+                order_number=generate_online_order_number(shop),
+                client_order_id=client_order_id,
+                customer=request.user,
+                shop=shop,
+                customer_name=request.user.get_full_name() or request.user.username or request.user.phone,
+                customer_phone=request.user.phone,
+                payment_method=payment_method,
+                payment_status="unpaid",
+                order_type="online",
+                pickup_type=pickup_type,
+                pickup_time=parsed_pickup_time,
+                notes=notes,
+                status="pending",
+                estimated_minutes=estimated_minutes,
+                estimated_ready_time=estimated_ready_time,
+                pickup_by_other_person=pickup_by_other_person,
+                pickup_person_name=pickup_person_name,
+                pickup_person_phone=pickup_person_phone,
+                delivery_option=delivery_option,
+                delivery_address=delivery_address if delivery_option == "delivery" else "",
+                delivery_latitude=delivery_lat if delivery_option == "delivery" else None,
+                delivery_longitude=delivery_lng if delivery_option == "delivery" else None,
+                delivery_fee=delivery_fee,
+            )
+        except IntegrityError:
+            # If concurrent request already placed order with this client_order_id, return that order
+            if client_order_id:
+                existing = Order.objects.filter(client_order_id=client_order_id, customer=request.user).first()
+                if existing:
+                    return Response(OrderSerializer(existing).data, status=status.HTTP_200_OK)
+            raise
 
         # ============================================
         # 4. Process the cart with OfferEngine (unchanged)
@@ -557,6 +604,12 @@ class AcceptOrderView(APIView):
         if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
             return Response({"error": "Order does not belong to your assigned shop"}, status=403)
 
+        if order.status != "pending":
+            return Response(
+                {"error": f"Cannot accept order in '{order.status}' status. Only pending orders can be accepted."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # ======================================================
         # Atomic transition: ACCEPTED → PREPARING
         # ======================================================
@@ -743,6 +796,12 @@ class PreparingOrderView(APIView):
         if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
             return Response({"error": "Order does not belong to your assigned shop"}, status=403)
 
+        if order.status not in ["pending", "accepted"]:
+            return Response(
+                {"error": f"Cannot transition order from '{order.status}' to preparing. Order must be pending or accepted."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         order.status = "preparing"
         order.save()
         send_order_update(order)
@@ -774,6 +833,12 @@ class ReadyOrderView(APIView):
 
         if request.user.role != "super_admin" and request.user.staff_shop != order.shop:
             return Response({"error": "Order does not belong to your assigned shop"}, status=403)
+
+        if order.status not in ["preparing", "accepted"]:
+            return Response(
+                {"error": f"Cannot mark order as ready from '{order.status}' status. Order must be preparing first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # Mark as READY
         order.status = "ready"
@@ -842,6 +907,12 @@ class CollectedOrderView(APIView):
 
         if request.user.role not in ["super_admin", "delivery_boy"] and request.user.staff_shop != order.shop:
             return Response({"error": "Order does not belong to your assigned shop"}, status=403)
+
+        if order.status != "ready":
+            return Response(
+                {"error": f"Cannot mark order as collected from '{order.status}' status. Order must be ready first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # If payment is not marked paid yet, allow setting paid if requested
         if order.payment_status != "paid":
@@ -3609,7 +3680,10 @@ class ViewReceiptPDFView(View):
 
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
-from django_filters.rest_framework import DjangoFilterBackend
+try:
+    from django_filters.rest_framework import DjangoFilterBackend
+except ImportError:
+    DjangoFilterBackend = None
 from rest_framework.filters import SearchFilter, OrderingFilter
 from .models import Order
 from .serializers import OrderSerializer
@@ -3626,7 +3700,7 @@ class SuperAdminOrderListView(generics.ListAPIView):
     pagination_class = PageNumberPagination
     pagination_class.page_size = 15                    # default items per page
     pagination_class.page_size_query_param = 'page_size'  # allow frontend to set
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filter_backends = [f for f in [DjangoFilterBackend, SearchFilter, OrderingFilter] if f is not None]
     filterset_fields = ['status', 'order_type', 'payment_status', 'shop__id']
     search_fields = ['order_number', 'customer__phone', 'customer__first_name', 'customer__last_name']
     ordering_fields = ['ordered_at', 'total_amount', 'status']
@@ -3641,6 +3715,19 @@ class SuperAdminOrderListView(generics.ListAPIView):
             queryset = queryset.filter(ordered_at__date__gte=start_date)
         if end_date:
             queryset = queryset.filter(ordered_at__date__lte=end_date)
+        if DjangoFilterBackend is None:
+            status_param = self.request.query_params.get('status')
+            if status_param:
+                queryset = queryset.filter(status=status_param)
+            order_type_param = self.request.query_params.get('order_type')
+            if order_type_param:
+                queryset = queryset.filter(order_type=order_type_param)
+            payment_status_param = self.request.query_params.get('payment_status')
+            if payment_status_param:
+                queryset = queryset.filter(payment_status=payment_status_param)
+            shop_id = self.request.query_params.get('shop__id') or self.request.query_params.get('shop')
+            if shop_id:
+                queryset = queryset.filter(shop_id=shop_id)
         return queryset
 
 

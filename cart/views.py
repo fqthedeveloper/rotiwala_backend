@@ -47,17 +47,22 @@ class AddToCartView(APIView):
 
         try:
             quantity = int(quantity)
-        except:
-            quantity = 1
+            if quantity < 1 or quantity > 99:
+                return Response(
+                    {"error": "Quantity must be between 1 and 99."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "Invalid quantity provided."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         try:
-
             menu_item = MenuItem.objects.get(
                 id=menu_item_id
             )
-
         except MenuItem.DoesNotExist:
-
             return Response(
                 {
                     "error": f"Menu item with id {menu_item_id} not found"
@@ -65,9 +70,27 @@ class AddToCartView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        if not menu_item.is_available or not getattr(menu_item, 'is_active', True):
+            return Response(
+                {
+                    "error": f"Item '{menu_item.name}' is currently unavailable."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         cart, created = Cart.objects.get_or_create(
             customer=request.user
         )
+
+        # Cross-shop protection: ensure all cart items belong to the same branch
+        existing_first_item = cart.items.select_related('menu_item').first()
+        if existing_first_item and existing_first_item.menu_item.shop_id != menu_item.shop_id:
+            return Response(
+                {
+                    "error": "Your cart contains items from another branch. Please clear your cart before adding items from this branch."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         cart_item, created = CartItem.objects.get_or_create(
             cart=cart,
@@ -77,7 +100,13 @@ class AddToCartView(APIView):
         if created:
             cart_item.quantity = quantity
         else:
-            cart_item.quantity += quantity
+            new_qty = cart_item.quantity + quantity
+            if new_qty > 99:
+                return Response(
+                    {"error": "Maximum quantity allowed per item is 99."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            cart_item.quantity = new_qty
 
         cart_item.save()
 
@@ -101,14 +130,11 @@ class UpdateCartItemView(APIView):
         quantity = request.data.get("quantity")
 
         try:
-
             cart_item = CartItem.objects.get(
                 id=pk,
                 cart__customer=request.user
             )
-
         except CartItem.DoesNotExist:
-
             return Response(
                 {
                     "error": "Cart item not found"
@@ -116,12 +142,22 @@ class UpdateCartItemView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        quantity = int(quantity)
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "Quantity must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if quantity > 99:
+            return Response(
+                {"error": "Maximum quantity allowed per item is 99."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if quantity <= 0:
-
             cart_item.delete()
-
             return Response(
                 {
                     "message": "Item removed"

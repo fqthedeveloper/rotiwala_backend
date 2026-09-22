@@ -12,6 +12,12 @@ class MenuCategory(models.Model):
         return self.name
 
 
+import os
+from io import BytesIO
+from django.core.files.base import ContentFile
+from PIL import Image as PILImage
+
+
 class MenuItem(models.Model):
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="menu_items")
     category = models.ForeignKey(MenuCategory, on_delete=models.CASCADE, related_name="items")
@@ -25,3 +31,36 @@ class MenuItem(models.Model):
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        # Auto-optimize large 6-20MB PNG / JPEG images on upload
+        if self.image and not getattr(self, '_image_optimized', False):
+            try:
+                if hasattr(self.image, 'file'):
+                    img = PILImage.open(self.image)
+                    max_dim = 1200
+                    needs_resize = img.width > max_dim or img.height > max_dim
+                    needs_compression = getattr(self.image, 'size', 0) > 400 * 1024
+
+                    if needs_resize or needs_compression:
+                        if needs_resize:
+                            img.thumbnail((max_dim, max_dim), PILImage.Resampling.LANCZOS)
+
+                        output = BytesIO()
+                        # Preserve alpha channel for transparent PNGs
+                        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                            img.save(output, format='PNG', optimize=True)
+                            ext = '.png'
+                        else:
+                            if img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            img.save(output, format='JPEG', quality=85, optimize=True)
+                            ext = '.jpg'
+
+                        output.seek(0)
+                        base_name = os.path.splitext(os.path.basename(self.image.name))[0]
+                        self.image.save(f"{base_name}{ext}", ContentFile(output.read()), save=False)
+                        self._image_optimized = True
+            except Exception:
+                pass
+        super().save(*args, **kwargs)

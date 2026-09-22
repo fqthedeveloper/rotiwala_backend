@@ -12,7 +12,6 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser  # <-
 
 from accounts.permissions import IsSuperAdmin, CanReadOwnShop
 from accounts.models import User, ManagerProfile
-from geopy.distance import geodesic
 from .models import Shop, ShopOrderCapacityAudit
 from .serializers import ShopSerializer
 from .services import get_order_capacity_snapshot

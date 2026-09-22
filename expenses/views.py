@@ -12,7 +12,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.exceptions import ValidationError
-from django_filters.rest_framework import DjangoFilterBackend
+try:
+    from django_filters.rest_framework import DjangoFilterBackend
+except ImportError:
+    DjangoFilterBackend = None
 from rest_framework.filters import SearchFilter, OrderingFilter
 from datetime import datetime
 from decimal import Decimal
@@ -176,7 +179,7 @@ class ExpenseListView(generics.ListAPIView):
     serializer_class = ExpenseEntrySerializer
     pagination_class = PageNumberPagination
     pagination_class.page_size = 20
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filter_backends = [f for f in [DjangoFilterBackend, SearchFilter, OrderingFilter] if f is not None]
     filterset_fields = ['category', 'shop', 'entry_datetime']
     search_fields = ['shop__name', 'category__name', 'notes']
     ordering_fields = ['entry_datetime', 'total_amount']
@@ -268,7 +271,7 @@ class MaintenanceExpenseListView(generics.ListAPIView):
     serializer_class = MaintenanceExpenseSerializer
     pagination_class = PageNumberPagination
     pagination_class.page_size = 20
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filter_backends = [f for f in [DjangoFilterBackend, SearchFilter, OrderingFilter] if f is not None]
     filterset_fields = ['shop', 'maintenance_date']
     search_fields = ['title', 'description']
     ordering_fields = ['maintenance_date', 'amount']
