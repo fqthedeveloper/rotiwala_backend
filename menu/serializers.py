@@ -26,12 +26,33 @@ class MenuItemSerializer(serializers.ModelSerializer):
         ]
 
     def get_image_url(self, obj):
-        request = self.context.get("request")
         if not obj.image:
             return None
+        url = obj.image.url
+        request = self.context.get("request")
         if request:
-            return request.build_absolute_uri(obj.image.url)
-        return obj.image.url
+            full_url = request.build_absolute_uri(url)
+        else:
+            full_url = url
+
+        if full_url.startswith("/"):
+            full_url = f"https://backend.alidarbar.in{full_url}"
+
+        if "127.0.0.1:8000" in full_url or "localhost:8000" in full_url or "testserver" in full_url:
+            full_url = full_url.replace("http://127.0.0.1:8000", "https://backend.alidarbar.in")
+            full_url = full_url.replace("http://localhost:8000", "https://backend.alidarbar.in")
+            full_url = full_url.replace("http://testserver", "https://backend.alidarbar.in")
+
+        if "backend.alidarbar.in" in full_url and full_url.startswith("http://"):
+            full_url = full_url.replace("http://", "https://")
+
+        return full_url
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if ret.get("image_url"):
+            ret["image"] = ret["image_url"]
+        return ret
 
     def _discount(self, obj):
         if not hasattr(obj, "_discount_cache"):

@@ -167,6 +167,11 @@ CSRF_TRUSTED_ORIGINS = [
     "https://backend.alidarbar.in",
 ]
 
+# Nginx reverse proxy SSL & Host headers
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
+
 from datetime import timedelta
 
 SIMPLE_JWT = {
