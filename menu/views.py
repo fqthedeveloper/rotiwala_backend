@@ -40,11 +40,11 @@ class PublicMenuItemListView(generics.ListAPIView):
     def get_queryset(self):
         queryset = MenuItem.objects.filter(is_available=True)
         
-        category_id = self.request.GET.get("category")
+        category_id = self.request.GET.get("category") or self.request.GET.get("category_id")
         if category_id:
             queryset = queryset.filter(category_id=category_id)
         
-        shop_id = self.request.GET.get("shop")
+        shop_id = self.request.GET.get("shop") or self.request.GET.get("shop_id")
         if shop_id:
             queryset = queryset.filter(shop_id=shop_id)
         
