@@ -37,6 +37,7 @@ urlpatterns = [
     path('walkin/cart/', WalkInCartListView.as_view(), name='walkin-cart-list'),
     path('walkin/cart/<int:pk>/', WalkInCartDetailView.as_view(), name='walkin-cart-detail'),
     path('walkin/cart/<int:pk>/add-item/', AddWalkInCartItemView.as_view(), name='add-walkin-cart-item'),
+    path('walkin/cart/<int:pk>/clear-items/', ClearWalkInCartItemsView.as_view(), name='clear-walkin-cart-items'),
     path('walkin/cart/item/<int:pk>/', UpdateWalkInCartItemView.as_view(), name='update-walkin-cart-item'),
     path('walkin/cart/item/<int:pk>/delete/', DeleteWalkInCartItemView.as_view(), name='delete-walkin-cart-item'),
     path('walkin/cart/<int:pk>/update/', UpdateWalkInCartView.as_view(), name='update-walkin-cart'),

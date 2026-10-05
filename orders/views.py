@@ -395,11 +395,17 @@ class PlaceOrderView(APIView):
         for item_result in cart_result["items"]:
             offer = item_result["offer"]
             cart_item = item_result["item"]
+            item_display_name = (
+                f"{cart_item.menu_item.name} ({cart_item.variant.name})"
+                if cart_item.variant
+                else cart_item.menu_item.name
+            )
             OrderItem.objects.create(
                 order=order,
                 menu_item=cart_item.menu_item,
+                variant=cart_item.variant,
                 discount=offer.discount,
-                item_name=cart_item.menu_item.name,
+                item_name=item_display_name,
                 original_price=offer.original_price,
                 discount_amount=offer.discount_amount,
                 final_price=offer.final_price,
@@ -1362,27 +1368,52 @@ class CustomerSearchView(APIView):
             })
 
         profile, _ = CustomerProfile.objects.get_or_create(
-
             user=customer,
-
             defaults={
-
                 "trust_score": 100,
-
                 "total_orders": 0,
-
             }
-
         )
         
+        name = f"{customer.first_name} {customer.last_name}".strip() or customer.first_name or "Walk-In Customer"
         return Response({
             "found": True,
             "id": customer.id,
-            "name": f"{customer.first_name} {customer.last_name}",
+            "name": name,
             "phone": customer.phone,
+            "clean_phone": phone,
             "trust_score": profile.trust_score,
             "total_orders": profile.total_orders,
         })
+
+    def post(self, request):
+        phone = request.data.get("phone", "")
+        name = request.data.get("name", "").strip() or "Walk-In Customer"
+
+        customer, created = get_or_create_customer(phone, name)
+        if not customer:
+            return Response(
+                {"error": "Valid 10-digit mobile number required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        profile, _ = CustomerProfile.objects.get_or_create(
+            user=customer,
+            defaults={"trust_score": 100, "total_orders": 0}
+        )
+
+        display_name = f"{customer.first_name} {customer.last_name}".strip() or customer.first_name or "Walk-In Customer"
+
+        return Response({
+            "success": True,
+            "created": created,
+            "id": customer.id,
+            "name": display_name,
+            "phone": customer.phone,
+            "clean_phone": customer.phone.replace("+91", "").replace("91", ""),
+            "trust_score": profile.trust_score,
+            "total_orders": profile.total_orders,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
         
         
 # ==========================================
@@ -1396,6 +1427,7 @@ from accounts.models import User, CustomerProfile
 def get_or_create_customer(phone, name):
     """
     Returns (customer, created) where created is True if a new customer was made.
+    Ensures user phone has +91 prefix and password is the 10-digit clean number without +91.
     """
     if not phone:
         return None, False
@@ -1403,7 +1435,7 @@ def get_or_create_customer(phone, name):
     # ---------------------------------------
     # Normalize Phone
     # ---------------------------------------
-    phone = phone.strip().replace(" ", "").replace("-", "")
+    phone = str(phone).strip().replace(" ", "").replace("-", "")
     if phone.startswith("+91"):
         clean_phone = phone[3:]
     elif phone.startswith("91"):
@@ -1411,83 +1443,82 @@ def get_or_create_customer(phone, name):
     else:
         clean_phone = phone
 
+    if len(clean_phone) != 10 or not clean_phone.isdigit():
+        return None, False
+
     full_phone = "+91" + clean_phone
     possible_numbers = [clean_phone, "91" + clean_phone, full_phone]
 
     # ---------------------------------------
-    # Try to find existing customer
+    # Try to find existing user with this phone (ANY role)
     # ---------------------------------------
-    customer = User.objects.filter(role="customer", phone__in=possible_numbers).first()
+    customer = User.objects.filter(phone__in=possible_numbers).first()
+    if not customer:
+        customer = User.objects.filter(phone__endswith=clean_phone).first()
+
     if customer:
         CustomerProfile.objects.get_or_create(
             user=customer,
             defaults={"trust_score": 100, "total_orders": 0}
         )
+        # Update name if previously generic and now specific
+        if name and name != "Walk-In Customer" and (not customer.first_name or customer.first_name == "Walk-In Customer"):
+            customer.first_name = name
+            customer.save(update_fields=["first_name"])
         return customer, False
 
     # ---------------------------------------
-    # Create new customer (with lock)
+    # Create new customer (with lock and safe exception handling)
     # ---------------------------------------
-    with transaction.atomic():
-        customer = User.objects.select_for_update().filter(
-            role="customer", phone__in=possible_numbers
-        ).first()
+    try:
+        with transaction.atomic():
+            customer = User.objects.select_for_update().filter(phone__in=possible_numbers).first()
+            if not customer:
+                customer = User.objects.select_for_update().filter(phone__endswith=clean_phone).first()
+            if customer:
+                CustomerProfile.objects.get_or_create(
+                    user=customer,
+                    defaults={"trust_score": 100, "total_orders": 0}
+                )
+                return customer, False
+
+            # Generate unique username
+            username = clean_phone
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{clean_phone}_{counter}"
+                counter += 1
+
+            customer = User.objects.create(
+                username=username,
+                first_name=name or "Walk-In Customer",
+                phone=full_phone,
+                role="customer",
+                is_active=True,
+                is_phone_verified=True,
+            )
+            # Password = 10-digit number without +91
+            customer.set_password(clean_phone)
+            customer.save()
+
+            CustomerProfile.objects.get_or_create(
+                user=customer,
+                defaults={
+                    "trust_score": 100,
+                    "total_orders": 0,
+                }
+            )
+            return customer, True
+    except IntegrityError:
+        # Fallback if user with this phone or username was created concurrently
+        customer = User.objects.filter(phone__endswith=clean_phone).first()
         if customer:
             CustomerProfile.objects.get_or_create(
                 user=customer,
                 defaults={"trust_score": 100, "total_orders": 0}
             )
             return customer, False
-
-        # Generate unique username
-        username = clean_phone
-        counter = 1
-        while User.objects.filter(username=username).exists():
-            username = f"{clean_phone}_{counter}"
-            counter += 1
-
-        customer = User(
-            username=username,
-            first_name=name or "Walk‑In Customer",
-            phone=full_phone,
-            role="customer",
-            is_active=True,
-            is_phone_verified=True,
-        )
-        customer.set_password(clean_phone)  # default password = phone number
-        customer.save()
-
-        CustomerProfile.objects.get_or_create(
-            user=customer,
-            defaults={
-                "trust_score": 100,
-                "total_orders": 0,
-            }
-        )
-        return customer, True
-
-        # ---------------------------------------
-        # Default Password = Mobile Number
-        # Example:
-        # Phone : 9876543210
-        # Password : 9876543210
-        # ---------------------------------------
-
-        customer.set_password(clean_phone)
-
-        customer.save()
-
-        CustomerProfile.objects.create(
-
-            user=customer,
-
-            trust_score=100,
-
-            total_orders=0,
-
-        )
-
-        return customer
+        return None, False
     
     
     
@@ -1584,28 +1615,14 @@ class CreateWalkInCartView(APIView):
             payment_status = "unpaid"
 
         # ------------------------------------
-        # Normalize Phone
+        # Resolve or Create Customer
         # ------------------------------------
-
+        customer_obj = None
         if customer_phone:
-
-            customer_phone = (
-                customer_phone
-                .replace(" ", "")
-                .replace("-", "")
-            )
-
-            if customer_phone.startswith("+91"):
-
-                pass
-
-            elif customer_phone.startswith("91"):
-
-                customer_phone = "+" + customer_phone
-
-            else:
-
-                customer_phone = "+91" + customer_phone
+            customer_obj, _ = get_or_create_customer(customer_phone, customer_name)
+            if customer_obj:
+                customer_phone = customer_obj.phone
+                customer_name = customer_obj.first_name or customer_name
 
         # ------------------------------------
         # Create Draft Cart
@@ -1626,7 +1643,7 @@ class CreateWalkInCartView(APIView):
 
                     shop=shop,
 
-                    customer=None,
+                    customer=customer_obj,
 
                     customer_name=customer_name,
 
@@ -1734,255 +1751,181 @@ def update_walkin_cart_total(cart):
     cart.save(update_fields=["total_amount", "updated_at"])
     
 
-        
-class WalkInCartDetailView(APIView):
+def get_walkin_cart_for_user(pk, user, status=None):
+    from django.db.models import Q
+    qs = WalkInCart.objects.filter(id=pk)
+    if status:
+        qs = qs.filter(status=status)
+    if user.role == "super_admin":
+        return qs.first()
+    shop = getattr(user, "staff_shop", None)
+    cond = Q(manager=user)
+    if shop:
+        cond |= Q(shop=shop)
+    return qs.filter(cond).first()
 
+
+class WalkInCartDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
 
-        if request.user.role != "manager":
+        cart = get_walkin_cart_for_user(pk, request.user)
+        if not cart:
+            return Response({"error": "Cart not found"}, status=404)
 
-            return Response(
-                {
-                    "error": "Permission denied"
-                },
-                status=403
-            )
-
-        try:
-
-            cart = WalkInCart.objects.get(
-
-                id=pk,
-
-                manager=request.user
-
-            )
-
-        except WalkInCart.DoesNotExist:
-
-            return Response(
-
-                {
-                    "error": "Cart not found"
-                },
-
-                status=404
-
-            )
-
-        serializer = WalkInCartSerializer(
-
-            cart
-
-        )
-
-        return Response(
-
-            serializer.data
-
-        )
+        serializer = WalkInCartSerializer(cart)
+        return Response(serializer.data)
 
 
 class AddWalkInCartItemView(APIView):
-
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
 
-        if request.user.role != "manager":
-
-            return Response(
-                {
-                    "error": "Permission denied"
-                },
-                status=403
-            )
-
-        try:
-
-            cart = WalkInCart.objects.get(
-
-                id=pk,
-
-                manager=request.user,
-
-                status="draft"
-
-            )
-
-        except WalkInCart.DoesNotExist:
-
-            return Response(
-                {
-                    "error": "Cart not found"
-                },
-                status=404
-            )
+        cart = get_walkin_cart_for_user(pk, request.user, status="draft")
+        if not cart:
+            return Response({"error": "Cart not found"}, status=404)
 
         menu_item_id = request.data.get("menu_item")
-
-        quantity = int(
-            request.data.get(
-                "quantity",
-                1
-            )
-        )
+        quantity = int(request.data.get("quantity", 1))
 
         try:
-
             menu_item = MenuItem.objects.get(
                 id=menu_item_id,
                 is_available=True
             )
-
         except MenuItem.DoesNotExist:
+            return Response({"error": "Menu item not found"}, status=404)
 
-            return Response(
-                {
-                    "error": "Menu item not found"
-                },
-                status=404
-            )
+        variant_id = request.data.get("variant") or request.data.get("variant_id")
+        variant = None
+        if variant_id:
+            from menu.models import MenuItemVariant
+            try:
+                variant = MenuItemVariant.objects.get(id=variant_id, menu_item=menu_item, is_active=True)
+            except MenuItemVariant.DoesNotExist:
+                return Response({"error": "Variant not found or unavailable"}, status=404)
 
-        cart_item = WalkInCartItem.objects.filter(
+        from django.db import transaction
 
-            cart=cart,
-
-            menu_item=menu_item
-
-        ).first()
-
-        if cart_item:
-
-            cart_item.quantity += quantity
-
-            cart_item.save()
-
-        else:
-
-            cart_item = WalkInCartItem.objects.create(
-
+        with transaction.atomic():
+            cart_items = WalkInCartItem.objects.select_for_update().filter(
                 cart=cart,
-
                 menu_item=menu_item,
-
-                item_name=menu_item.name,
-
-                item_price=menu_item.base_price,
-
-                quantity=quantity
-
+                variant=variant
             )
+            cart_item = cart_items.first()
 
-        update_walkin_cart_total(cart)
+            if cart_item:
+                if cart_items.count() > 1:
+                    extra_items = cart_items.exclude(id=cart_item.id)
+                    for extra in extra_items:
+                        cart_item.quantity += extra.quantity
+                    extra_items.delete()
+                cart_item.quantity += quantity
+                cart_item.save()
+            else:
+                item_name = f"{menu_item.name} ({variant.name})" if variant else menu_item.name
+                item_price = variant.price if variant else menu_item.base_price
+                cart_item = WalkInCartItem.objects.create(
+                    cart=cart,
+                    menu_item=menu_item,
+                    variant=variant,
+                    item_name=item_name,
+                    item_price=item_price,
+                    quantity=quantity
+                )
+
+            update_walkin_cart_total(cart)
 
         serializer = WalkInCartSerializer(cart)
-
         return Response(serializer.data)
-    
-    
-class UpdateWalkInCartItemView(APIView):
 
+
+class UpdateWalkInCartItemView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
 
-        if request.user.role != "manager":
-
-            return Response(
-                {
-                    "error": "Permission denied"
-                },
-                status=403
-            )
+        from django.db.models import Q
+        shop = getattr(request.user, "staff_shop", None)
+        item_q = Q(cart__manager=request.user)
+        if shop:
+            item_q |= Q(cart__shop=shop)
 
         try:
-
             item = WalkInCartItem.objects.get(
-                id=pk,
-                cart__manager=request.user,
-                cart__status="draft"
+                Q(id=pk, cart__status="draft") & (item_q if request.user.role != "super_admin" else Q())
             )
-
         except WalkInCartItem.DoesNotExist:
+            return Response({"error": "Item not found"}, status=404)
 
-            return Response(
-                {
-                    "error": "Item not found"
-                },
-                status=404
-            )
-
-        quantity = int(
-            request.data.get(
-                "quantity",
-                1
-            )
-        )
+        quantity = int(request.data.get("quantity", 1))
 
         if quantity <= 0:
-
+            cart = item.cart
             item.delete()
-
-            return Response(
-                {
-                    "message": "Item removed"
-                }
-            )
+            update_walkin_cart_total(cart)
+            serializer = WalkInCartSerializer(cart)
+            return Response(serializer.data)
 
         item.quantity = quantity
-
         item.save()
 
         update_walkin_cart_total(item.cart)
-
         serializer = WalkInCartSerializer(item.cart)
-
         return Response(serializer.data)
-    
-    
-class DeleteWalkInCartItemView(APIView):
 
+
+class DeleteWalkInCartItemView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
 
-        if request.user.role != "manager":
-
-            return Response(
-                {
-                    "error": "Permission denied"
-                },
-                status=403
-            )
+        from django.db.models import Q
+        shop = getattr(request.user, "staff_shop", None)
+        item_q = Q(cart__manager=request.user)
+        if shop:
+            item_q |= Q(cart__shop=shop)
 
         try:
-
             item = WalkInCartItem.objects.get(
-                id=pk,
-                cart__manager=request.user,
-                cart__status="draft"
+                Q(id=pk, cart__status="draft") & (item_q if request.user.role != "super_admin" else Q())
             )
-
         except WalkInCartItem.DoesNotExist:
-
-            return Response(
-                {
-                    "error": "Item not found"
-                },
-                status=404
-            )
+            return Response({"error": "Item not found"}, status=404)
 
         cart = item.cart
-
         item.delete()
 
         update_walkin_cart_total(cart)
-
         serializer = WalkInCartSerializer(cart)
+        return Response(serializer.data)
 
+
+class ClearWalkInCartItemsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role not in ["manager", "super_admin"]:
+            return Response({"error": "Permission denied"}, status=403)
+
+        cart = get_walkin_cart_for_user(pk, request.user, status="draft")
+        if not cart:
+            return Response({"error": "Draft cart not found"}, status=404)
+
+        cart.items.all().delete()
+        update_walkin_cart_total(cart)
+        serializer = WalkInCartSerializer(cart)
         return Response(serializer.data)
     
 
@@ -2013,139 +1956,62 @@ class UpdateWalkInCartView(APIView):
         # Get Draft Cart
         # --------------------------------------
 
-        try:
-
-            cart = WalkInCart.objects.get(
-
-                id=pk,
-
-                manager=request.user,
-
-                status="draft"
-
-            )
-
-        except WalkInCart.DoesNotExist:
-
+        cart = get_walkin_cart_for_user(pk, request.user, status="draft")
+        if not cart:
             return Response(
-
                 {
                     "error": "Draft cart not found"
                 },
-
                 status=status.HTTP_404_NOT_FOUND
-
             )
 
         # --------------------------------------
-        # Read Request Data
+        # Update Customer details (only if provided)
         # --------------------------------------
-
-        customer_name = request.data.get(
-
-            "customer_name",
-
-            cart.customer_name
-
-        )
-
-        customer_phone = request.data.get(
-
-            "customer_phone",
-
-            cart.customer_phone
-
-        )
-
-        payment_method = request.data.get(
-
-            "payment_method",
-
-            cart.payment_method
-
-        )
-
-        payment_status = request.data.get(
-
-            "payment_status",
-
-            cart.payment_status
-
-        )
-
-        notes = request.data.get(
-
-            "notes",
-
-            cart.notes
-
-        )
-
-        # --------------------------------------
-        # Normalize Phone Number
-        # --------------------------------------
-
-        if customer_phone:
-
-            customer_phone = (
-                customer_phone
-                .replace(" ", "")
-                .replace("-", "")
-            )
-
-            if customer_phone.startswith("+91"):
-
-                pass
-
-            elif customer_phone.startswith("91"):
-
-                customer_phone = "+" + customer_phone
-
+        if "customer_phone" in request.data:
+            customer_phone = str(request.data.get("customer_phone") or "").strip()
+            customer_name = str(request.data.get("customer_name") or cart.customer_name).strip() or "Walk-In Customer"
+            if customer_phone:
+                customer_obj, _ = get_or_create_customer(customer_phone, customer_name)
+                if customer_obj:
+                    cart.customer = customer_obj
+                    cart.customer_phone = customer_obj.phone
+                    cart.customer_name = customer_obj.first_name or customer_name
+                else:
+                    clean = customer_phone.replace(" ", "").replace("-", "")
+                    if not clean.startswith("+91"):
+                        clean = "+91" + clean.replace("91", "")
+                    cart.customer = None
+                    cart.customer_phone = clean
+                    cart.customer_name = customer_name
             else:
-
-                customer_phone = "+91" + customer_phone
-
-        # --------------------------------------
-        # Validate Payment Method
-        # --------------------------------------
-
-        if payment_method not in [
-
-            "cash",
-
-            "upi",
-
-        ]:
-
-            payment_method = "cash"
+                cart.customer = None
+                cart.customer_phone = ""
+                cart.customer_name = customer_name
+        elif "customer_name" in request.data:
+            cart.customer_name = str(request.data.get("customer_name") or "").strip() or "Walk-In Customer"
 
         # --------------------------------------
-        # Validate Payment Status
+        # Update Payment Method (if provided)
         # --------------------------------------
+        if "payment_method" in request.data:
+            method = request.data.get("payment_method")
+            if method in ["cash", "upi", "credit", "parts"]:
+                cart.payment_method = method
 
-        if payment_status not in [
-
-            "paid",
-
-            "unpaid",
-
-        ]:
-
-            payment_status = "unpaid"
-        
-                # --------------------------------------
-        # Update Cart
         # --------------------------------------
+        # Update Payment Status (if provided)
+        # --------------------------------------
+        if "payment_status" in request.data:
+            p_status = request.data.get("payment_status")
+            if p_status in ["paid", "unpaid"]:
+                cart.payment_status = p_status
 
-        cart.customer_name = customer_name
-
-        cart.customer_phone = customer_phone
-
-        cart.payment_method = payment_method
-
-        cart.payment_status = payment_status
-
-        cart.notes = notes
+        # --------------------------------------
+        # Update Notes (if provided)
+        # --------------------------------------
+        if "notes" in request.data:
+            cart.notes = request.data.get("notes") or ""
 
         cart.save()
 

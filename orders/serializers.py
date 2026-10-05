@@ -183,6 +183,10 @@ class WalkInCartItemSerializer(serializers.ModelSerializer):
 
             "item_price",
 
+            "variant",
+
+            "variant_name",
+
             "quantity",
 
             "total_price",
@@ -190,6 +194,11 @@ class WalkInCartItemSerializer(serializers.ModelSerializer):
             "created_at"
 
         ]
+
+    variant_name = serializers.CharField(
+        source="variant.name",
+        read_only=True
+    )
 
 
 # ==========================================
@@ -216,52 +225,44 @@ class WalkInCartSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    customer_trust_score = serializers.SerializerMethodField()
+    customer_total_orders = serializers.SerializerMethodField()
+
     class Meta:
-
         model = WalkInCart
-
         fields = [
-
             "id",
-
             "cart_number",
-
             "customer",
-
             "customer_name",
-
             "customer_phone",
-
+            "customer_trust_score",
+            "customer_total_orders",
             "payment_method",
-
             "payment_status",
-
             "notes",
-
             "status",
-
             "total_amount",
-
             "total_items",
-
             "created_at",
-
             "updated_at",
-
             "items",
-
-            "shop_id",      # ✅ added
-
-            "shop_name",    # ✅ added
-
+            "shop_id",
+            "shop_name",
         ]
 
     def get_total_items(self, obj):
-
         total = 0
-
         for item in obj.items.all():
-
             total += item.quantity
-
         return total
+
+    def get_customer_trust_score(self, obj):
+        if obj.customer and hasattr(obj.customer, 'customer_profile'):
+            return obj.customer.customer_profile.trust_score
+        return 100
+
+    def get_customer_total_orders(self, obj):
+        if obj.customer and hasattr(obj.customer, 'customer_profile'):
+            return obj.customer.customer_profile.total_orders
+        return 0

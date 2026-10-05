@@ -245,8 +245,6 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
             # When going online, set available if has capacity
             profile.is_available = profile.has_capacity
         profile.save(update_fields=['is_online', 'is_available'])
-        return Response(DeliveryBoyProfileSerializer(profile).data)
-
     @action(detail=True, methods=['post'])
     def toggle_available(self, request, pk=None):
         profile = self.get_object()
@@ -263,6 +261,69 @@ class DeliveryBoyProfileViewSet(viewsets.ModelViewSet):
         profile.is_available = not profile.is_available
         profile.save(update_fields=['is_available'])
         return Response(DeliveryBoyProfileSerializer(profile).data)
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        profile = self.get_object()
+        assignments = DeliveryAssignment.objects.filter(
+            delivery_boy=profile
+        ).select_related('order', 'parcel', 'shop').order_by('-assigned_at', '-id')
+
+        orders_history = []
+        total_trip_km = 0.0
+        today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_trip_km = 0.0
+
+        for a in assignments:
+            dist = float(a.actual_distance_km or a.estimated_distance_km or 0)
+            total_trip_km += dist
+            if a.assigned_at and a.assigned_at >= today_start:
+                today_trip_km += dist
+
+            orders_history.append({
+                'assignment_id': a.id,
+                'order_id': a.order_id,
+                'order_number': a.order.order_number if a.order else '',
+                'customer_name': a.order.customer_name if a.order else '',
+                'customer_phone': a.order.customer_phone if a.order else '',
+                'delivery_address': a.order.delivery_address if a.order else '',
+                'status': a.status,
+                'payment_mode': a.payment_mode or (a.order.payment_method if a.order else 'cash'),
+                'is_paid': a.is_paid or (a.order.payment_status == 'PAID' if a.order else False),
+                'total_amount': float(a.order.total_amount) if (a.order and a.order.total_amount) else 0.0,
+                'collected_amount': float(a.collected_amount) if a.collected_amount else (
+                    float(a.order.total_amount) if (a.is_paid and a.order and a.order.total_amount) else 0.0
+                ),
+                'distance_km': dist,
+                'assigned_at': a.assigned_at,
+                'accepted_at': a.accepted_at,
+                'picked_up_at': a.picked_up_at,
+                'out_for_delivery_at': a.out_for_delivery_at,
+                'delivered_at': a.delivered_at,
+            })
+
+        # Calculate statistics
+        delivered_count = sum(1 for o in orders_history if o['status'] == 'delivered')
+        active_count = sum(1 for o in orders_history if o['status'] in ['assigned', 'accepted', 'picked_up', 'out_for_delivery'])
+        cancelled_count = sum(1 for o in orders_history if o['status'] == 'cancelled')
+        total_cash_collected = sum(o['collected_amount'] for o in orders_history if o['status'] == 'delivered')
+
+        profile_data = DeliveryBoyProfileSerializer(profile).data
+
+        return Response({
+            'profile': profile_data,
+            'summary': {
+                'total_orders': len(orders_history),
+                'delivered_orders': delivered_count,
+                'active_orders': active_count,
+                'cancelled_orders': cancelled_count,
+                'total_distance_km': round(float(profile.total_distance_km or total_trip_km), 2),
+                'recorded_trip_km': round(total_trip_km, 2),
+                'today_distance_km': round(today_trip_km, 2),
+                'total_cash_collected': round(total_cash_collected, 2),
+            },
+            'orders': orders_history,
+        })
 
 
 # ============================================================

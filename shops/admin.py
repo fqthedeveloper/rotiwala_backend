@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from .models import Shop, ShopOrderCapacityAudit
 
 
@@ -55,7 +56,7 @@ class ShopAdmin(admin.ModelAdmin):
                 '</a>',
                 obj.upi_qr_image.url, obj.upi_qr_image.url
             )
-        return format_html(
+        return mark_safe(
             '<span style="color:#aaa; font-size:11px;">No QR</span>'
         )
     upi_qr_preview.short_description = 'UPI QR'
@@ -89,7 +90,7 @@ class ShopAdmin(admin.ModelAdmin):
                 dynamic_qr,
                 obj.upi_id
             )
-        return format_html(
+        return mark_safe(
             '<span style="color:#aaa;">No UPI QR image uploaded and no UPI ID set. '
             'Please fill in the UPI ID and optionally upload a QR image.</span>'
         )

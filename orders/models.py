@@ -20,6 +20,8 @@ class Order(models.Model):
     PAYMENT_METHODS = (
         ("cash", "Cash On Pickup"),
         ("upi", "UPI On Shop"),
+        ("credit", "Credit"),
+        ("parts", "Split / Part Payment"),
     )
 
     PAYMENT_STATUS = (
@@ -320,6 +322,13 @@ class OrderItem(models.Model):
         blank=True
     )
 
+    variant = models.ForeignKey(
+        "menu.MenuItemVariant",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
     discount = models.ForeignKey(
         "discounts.Discount",
         on_delete=models.SET_NULL,
@@ -495,6 +504,13 @@ class WalkInCartItem(models.Model):
     menu_item = models.ForeignKey(
         MenuItem,
         on_delete=models.CASCADE
+    )
+
+    variant = models.ForeignKey(
+        "menu.MenuItemVariant",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
     )
 
     item_name = models.CharField(

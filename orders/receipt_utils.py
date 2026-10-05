@@ -238,6 +238,13 @@ def generate_receipt_pdf(order, bill_type='standard'):
         pdf.cell(40, 7, txt='Tax:', align='R')
         pdf.cell(35, 7, txt=fmt(tax_amt), ln=1, align='R')
 
+    is_delivery = getattr(order, 'delivery_option', None) == 'delivery'
+    delivery_fee = float(getattr(order, 'delivery_fee', 0) or 0)
+    if is_delivery and delivery_fee > 0:
+        pdf.set_x(right_x)
+        pdf.cell(40, 7, txt='Delivery Fee:', align='R')
+        pdf.cell(35, 7, txt=fmt(delivery_fee), ln=1, align='R')
+
     pdf.set_x(right_x)
     pdf.set_font(FONT_FAMILY, 'B', 13)
     pdf.set_text_color(*brand_color)
@@ -249,11 +256,24 @@ def generate_receipt_pdf(order, bill_type='standard'):
 
     # ---------- Payment & Notes ----------
     pdf.set_font(FONT_FAMILY, '', 10)
-    pdf.cell(0, 6, txt=f"Payment Method: {getattr(order, 'payment_method', 'N/A')}", ln=1)
-    pdf.cell(0, 6, txt=f"Payment Status: {getattr(order, 'payment_status', 'N/A')}", ln=1)
-    pdf.cell(0, 6, txt=f"Order Type: {getattr(order, 'order_type', 'N/A')}", ln=1)
-    if getattr(order, 'pickup_type', None):
-        pdf.cell(0, 6, txt=f"Pickup: {order.pickup_type}", ln=1)
+    pdf.cell(0, 6, txt=f"Payment Method: {getattr(order, 'payment_method', 'N/A').upper()}", ln=1)
+    pdf.cell(0, 6, txt=f"Payment Status: {getattr(order, 'payment_status', 'N/A').upper()}", ln=1)
+    if is_delivery:
+        pdf.cell(0, 6, txt="Order Mode: ONLINE DELIVERY", ln=1)
+        if getattr(order, 'delivery_address', None):
+            pdf.cell(0, 6, txt=f"Delivery Address: {order.delivery_address}", ln=1)
+        try:
+            from delivery.models import Parcel
+            p_obj = getattr(order, 'parcel', None) or Parcel.objects.filter(order=order).first()
+            if p_obj and p_obj.parcel_number:
+                pdf.cell(0, 6, txt=f"Parcel No: {p_obj.parcel_number}", ln=1)
+        except Exception:
+            pass
+    else:
+        order_type_display = 'WALK-IN' if getattr(order, 'order_type', None) == 'walkin' else 'ONLINE'
+        pdf.cell(0, 6, txt=f"Order Mode: {order_type_display} PICKUP", ln=1)
+        pickup_val = (getattr(order, 'pickup_type', '') or 'instant').upper()
+        pdf.cell(0, 6, txt=f"Pickup: {pickup_val}", ln=1)
 
     if getattr(order, 'notes', None):
         pdf.ln(2)
@@ -283,16 +303,21 @@ def generate_receipt_pdf(order, bill_type='standard'):
     except Exception:
         pass
 
-    # Optional QR on the bottom-left
+    # Optional QR on bottom-left ONLY for delivery orders!
     try:
-        if QR_SUPPORT:
+        if is_delivery and QR_SUPPORT:
             qr_b64 = generate_qr_code(order)
             if qr_b64:
                 qr_bytes = base64.b64decode(qr_b64)
                 qr_buf = BytesIO(qr_bytes)
-                # place QR near bottom-left respecting bottom margin
                 qr_y = pdf.h - pdf.b_margin - 30
                 pdf.image(qr_buf, x=pdf.l_margin, y=qr_y, w=25, h=25)
+                pdf.set_xy(pdf.l_margin + 28, qr_y + 6)
+                pdf.set_font(FONT_FAMILY, 'B', 8)
+                pdf.cell(0, 4, txt="DRIVER SCAN QR", ln=1)
+                pdf.set_xy(pdf.l_margin + 28, qr_y + 11)
+                pdf.set_font(FONT_FAMILY, '', 7)
+                pdf.cell(0, 4, txt="Scan with Driver App to take out for delivery", ln=1)
     except Exception:
         pass
 
@@ -309,9 +334,40 @@ def generate_receipt_pdf(order, bill_type='standard'):
     return pdf_bytes
 
 
+def generate_qr_code(order):
+    """Generate QR code strictly for delivery orders to scan parcel"""
+    if not QR_SUPPORT:
+        return None
+    # Strictly for delivery orders!
+    if getattr(order, 'delivery_option', None) != 'delivery':
+        return None
+    try:
+        try:
+            from delivery.models import Parcel
+            parcel = getattr(order, 'parcel', None) or Parcel.objects.filter(order=order).first()
+            if not parcel:
+                from delivery.services import create_parcel_for_order
+                parcel = create_parcel_for_order(order)
+            if parcel and parcel.qr_token:
+                qr_data = parcel.qr_token
+            else:
+                qr_data = order.order_number
+        except Exception:
+            qr_data = order.order_number
+
+        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+        qr.add_data(qr_data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode()
+    except Exception:
+        return None
+
+
 def generate_receipt_text(order, bill_type='standard'):
-    """Plain text fallback (used only if PDF generation fails)"""
-    # ... (keep your existing implementation) ...
+    """Plain text fallback (used for thermal printers and modal view)"""
     line = '=' * 50
     dashed = '-' * 50
     items = order.items.all()
@@ -326,6 +382,27 @@ def generate_receipt_text(order, bill_type='standard'):
     lines.append('')
     lines.append(f'Customer : {order.customer_name or "Walk-in Customer"}')
     lines.append(f'Phone    : {order.customer_phone or "N/A"}')
+
+    is_delivery = getattr(order, 'delivery_option', None) == 'delivery'
+    delivery_fee = float(getattr(order, 'delivery_fee', 0) or 0)
+
+    if is_delivery:
+        lines.append('Mode     : ONLINE DELIVERY')
+        if getattr(order, 'delivery_address', None):
+            lines.append(f'Address  : {order.delivery_address}')
+        try:
+            from delivery.models import Parcel
+            p_obj = getattr(order, 'parcel', None) or Parcel.objects.filter(order=order).first()
+            if p_obj and p_obj.parcel_number:
+                lines.append(f'Parcel No: {p_obj.parcel_number}')
+        except Exception:
+            pass
+    else:
+        order_type_display = 'WALK-IN' if getattr(order, 'order_type', None) == 'walkin' else 'ONLINE'
+        lines.append(f'Mode     : {order_type_display} PICKUP')
+        pickup_val = (getattr(order, 'pickup_type', '') or 'instant').upper()
+        lines.append(f'Pickup   : {pickup_val}')
+
     lines.append('')
     lines.append(dashed)
     lines.append('')
@@ -339,20 +416,25 @@ def generate_receipt_text(order, bill_type='standard'):
     lines.append('')
     lines.append(dashed)
     lines.append('')
+
     original = float(order.original_amount or order.total_amount)
     lines.append(f'Subtotal              ₹{original:.2f}')
     if order.discount_amount and float(order.discount_amount) > 0:
         lines.append(f'Discount              ₹-{float(order.discount_amount):.2f}')
         if order.discount_name:
             lines.append(f'  ({order.discount_name})')
+    if is_delivery and delivery_fee > 0:
+        lines.append(f'Delivery Fee          ₹{delivery_fee:.2f}')
     lines.append('')
     lines.append(f'Grand Total           ₹{float(order.total_amount):.2f}')
     lines.append('')
     lines.append(f'Payment    : {order.payment_method.upper()}')
     lines.append(f'Status     : {order.payment_status.upper()}')
-    lines.append(f'Order Type : {order.order_type.upper()}')
-    if order.pickup_type:
-        lines.append(f'Pickup     : {order.pickup_type.upper()}')
+
+    if is_delivery:
+        lines.append('')
+        lines.append('[ DRIVER: SCAN RECEIPT QR CODE TO PICKUP ]')
+
     if order.notes:
         lines.append('')
         lines.append('Notes:')
@@ -366,7 +448,7 @@ def generate_receipt_text(order, bill_type='standard'):
 
 
 def generate_receipt_data(order, bill_type='standard'):
-    """Structured receipt data for frontend (unchanged)"""
+    """Structured receipt data for frontend"""
     items_data = []
     for item in order.items.all():
         line_total = float(item.original_price or item.final_price or item.total_price or 0)
@@ -380,6 +462,23 @@ def generate_receipt_data(order, bill_type='standard'):
             'final_price': float(item.final_price or item.total_price),
             'original_price': float(item.original_price or item.total_price),
         })
+
+    is_delivery = getattr(order, 'delivery_option', None) == 'delivery'
+    delivery_fee = float(getattr(order, 'delivery_fee', 0) or 0)
+    parcel = None
+    if is_delivery:
+        try:
+            from delivery.models import Parcel
+            parcel = getattr(order, 'parcel', None) or Parcel.objects.filter(order=order).first()
+            if not parcel:
+                from delivery.services import create_parcel_for_order
+                parcel = create_parcel_for_order(order)
+        except Exception:
+            pass
+
+    # Strictly only for delivery orders
+    qr_b64 = generate_qr_code(order) if is_delivery else None
+
     return {
         'order_number': order.order_number,
         'order_id': str(order.id),
@@ -389,27 +488,21 @@ def generate_receipt_data(order, bill_type='standard'):
         'items': items_data,
         'original_amount': float(order.original_amount or order.total_amount),
         'discount_amount': float(order.discount_amount or 0),
+        'delivery_fee': delivery_fee,
         'total_amount': float(order.total_amount),
         'payment_method': order.payment_method,
         'payment_status': order.payment_status,
         'order_type': order.order_type,
+        'delivery_option': getattr(order, 'delivery_option', 'pickup'),
+        'is_delivery': is_delivery,
+        'delivery_address': getattr(order, 'delivery_address', '') if is_delivery else '',
+        'parcel_number': parcel.parcel_number if parcel else None,
+        'qr_token': parcel.qr_token if parcel else None,
+        'qr_code': qr_b64,
         'shop_name': order.shop.name if order.shop else 'ROTI WALA',
-        'pickup_type': order.pickup_type or 'N/A',
+        'pickup_type': order.pickup_type or 'instant',
         'notes': order.notes,
         'receipt_text': generate_receipt_text(order, bill_type),
         'discount_name': order.discount_name,
         'status': order.status,
     }
-
-
-def generate_qr_code(order):
-    if not QR_SUPPORT:
-        return None
-    qr_data = f"ORDER:{order.order_number}|AMOUNT:{order.total_amount}|DATE:{order.ordered_at}"
-    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
-    qr.add_data(qr_data)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buffered = BytesIO()
-    img.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()

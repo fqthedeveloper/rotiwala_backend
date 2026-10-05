@@ -67,3 +67,18 @@ class MenuItem(models.Model):
             except Exception:
                 pass
         super().save(*args, **kwargs)
+
+
+class MenuItemVariant(models.Model):
+    menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name="variants")
+    name = models.CharField(max_length=100)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    is_available = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["price", "id"]
+
+    def __str__(self):
+        return f"{self.menu_item.name} - {self.name} (₹{self.price})"

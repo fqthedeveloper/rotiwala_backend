@@ -36,6 +36,13 @@ class CartItem(models.Model):
         on_delete=models.CASCADE
     )
 
+    variant = models.ForeignKey(
+        "menu.MenuItemVariant",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
     quantity = models.PositiveIntegerField(
         default=1
     )
@@ -45,8 +52,16 @@ class CartItem(models.Model):
     )
 
     @property
+    def unit_price(self):
+        if self.variant:
+            return self.variant.price
+        return self.menu_item.base_price
+
+    @property
     def total_price(self):
-        return self.menu_item.base_price * self.quantity
+        return self.unit_price * self.quantity
 
     def __str__(self):
+        if self.variant:
+            return f"{self.menu_item.name} ({self.variant.name})"
         return self.menu_item.name

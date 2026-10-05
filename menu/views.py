@@ -3,7 +3,7 @@
 from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.exceptions import ValidationError as DRFValidationError
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from .models import MenuCategory, MenuItem
 from .serializers import MenuCategorySerializer, MenuItemSerializer
@@ -100,7 +100,7 @@ class MenuItemListCreateView(generics.ListCreateAPIView):
     """
     serializer_class = MenuItemSerializer
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         user = self.request.user
@@ -137,4 +137,4 @@ class MenuItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = MenuItem.objects.all()
     serializer_class = MenuItemSerializer
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]

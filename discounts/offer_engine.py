@@ -91,9 +91,10 @@ class OfferEngine:
     # ==========================================
     # APPLY DISCOUNT (supports cart/category totals)
     # ==========================================
-    def apply_discount(self, menu_item, quantity, discount, cart_total=None, category_total=None):
+    def apply_discount(self, menu_item, quantity, discount, cart_total=None, category_total=None, custom_price=None):
         quantity = int(quantity)
-        item_subtotal = Decimal(menu_item.base_price) * quantity
+        price_to_use = Decimal(custom_price) if custom_price is not None else Decimal(menu_item.base_price)
+        item_subtotal = price_to_use * quantity
         result = OfferResult()
         result.original_price = item_subtotal
         result.final_price = item_subtotal
@@ -164,13 +165,14 @@ class OfferEngine:
     # ==========================================
     # GET AUTOMATIC DISCOUNT (with totals)
     # ==========================================
-    def get_discount_offer(self, menu_item, quantity=1, cart_total=None, category_total=None):
+    def get_discount_offer(self, menu_item, quantity=1, cart_total=None, category_total=None, custom_price=None):
         service = get_discounted_price(menu_item)
         discount = service["discount"]
         if discount is None:
-            result = self.empty_result(service["original_price"] * quantity)
+            price_to_use = Decimal(custom_price) if custom_price is not None else Decimal(service["original_price"])
+            result = self.empty_result(price_to_use * quantity)
             return result
-        return self.apply_discount(menu_item, quantity, discount, cart_total, category_total)
+        return self.apply_discount(menu_item, quantity, discount, cart_total, category_total, custom_price=custom_price)
 
     # ==========================================
     # COUPON LOGIC
@@ -246,11 +248,11 @@ class OfferEngine:
     # ==========================================
     # BEST OFFER
     # ==========================================
-    def get_best_offer(self, menu_item, quantity=1, cart_total=None, category_total=None):
+    def get_best_offer(self, menu_item, quantity=1, cart_total=None, category_total=None, custom_price=None):
         if self.forced_discount is not None:
-            return self.apply_discount(menu_item, quantity, self.forced_discount, cart_total, category_total)
+            return self.apply_discount(menu_item, quantity, self.forced_discount, cart_total, category_total, custom_price=custom_price)
 
-        discount_offer = self.get_discount_offer(menu_item, quantity, cart_total, category_total)
+        discount_offer = self.get_discount_offer(menu_item, quantity, cart_total, category_total, custom_price=custom_price)
         coupon_offer = self.get_coupon_offer(discount_offer.original_price)
         return self.compare_offers(discount_offer, coupon_offer)
 
@@ -274,11 +276,13 @@ class OfferEngine:
     # CART CALCULATION (with rounding)
     # ==========================================
     def calculate_cart_item(self, cart_item, cart_total=None, category_total=None):
+        unit_price = cart_item.unit_price if hasattr(cart_item, "unit_price") else cart_item.menu_item.base_price
         return self.get_best_offer(
             menu_item=cart_item.menu_item,
             quantity=cart_item.quantity,
             cart_total=cart_total,
-            category_total=category_total
+            category_total=category_total,
+            custom_price=unit_price
         )
 
     def calculate_cart(self, cart_items):
@@ -286,7 +290,8 @@ class OfferEngine:
         total_original = Decimal("0.00")
         category_totals = {}
         for item in cart_items:
-            item_total = Decimal(item.menu_item.base_price) * item.quantity
+            unit_price = item.unit_price if hasattr(item, "unit_price") else item.menu_item.base_price
+            item_total = Decimal(unit_price) * item.quantity
             total_original += item_total
             cat_id = item.menu_item.category_id
             if cat_id:
@@ -298,11 +303,13 @@ class OfferEngine:
         total_final = Decimal("0.00")
 
         for item in cart_items:
+            unit_price = item.unit_price if hasattr(item, "unit_price") else item.menu_item.base_price
             offer = self.get_best_offer(
                 menu_item=item.menu_item,
                 quantity=item.quantity,
                 cart_total=total_original,
-                category_total=category_totals.get(item.menu_item.category_id, Decimal("0.00"))
+                category_total=category_totals.get(item.menu_item.category_id, Decimal("0.00")),
+                custom_price=unit_price
             )
             item_results.append({"item": item, "offer": offer})
             total_discount += offer.discount_amount

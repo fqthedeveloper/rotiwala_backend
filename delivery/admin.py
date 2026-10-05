@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from .models import (
     DeliveryBoyProfile, DeliveryAssignment, Parcel,
     DeliveryLocation, WalkInTokenCounter, DeliveryBoyOTP
@@ -72,7 +73,7 @@ class DeliveryAssignmentAdmin(admin.ModelAdmin):
                 '</a>',
                 obj.payment_proof.url, obj.payment_proof.url
             )
-        return format_html('<span style="color:#aaa; font-size:11px;">No proof</span>')
+        return mark_safe('<span style="color:#aaa; font-size:11px;">No proof</span>')
     payment_proof_thumbnail.short_description = '📷 Proof'
 
     # ── detail view helpers ───────────────────────────────────
@@ -98,7 +99,7 @@ class DeliveryAssignmentAdmin(admin.ModelAdmin):
                 obj.payment_proof.url,
                 obj.payment_proof.url,
             )
-        return format_html(
+        return mark_safe(
             '<div style="padding:12px 16px; background:#fef2f2; border:1px dashed #ef4444; '
             'border-radius:8px; color:#b91c1c; font-size:13px;">'
             '  ❌ No payment proof photo has been uploaded yet.'

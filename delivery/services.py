@@ -242,9 +242,12 @@ def auto_assign_delivery(order, force=False):
 # ============================================================
 
 def scan_parcel(qr_token, delivery_boy_profile):
-    try:
-        parcel = Parcel.objects.select_for_update().get(qr_token=qr_token)
-    except Parcel.DoesNotExist:
+    from django.db.models import Q
+    token_str = str(qr_token).strip()
+    parcel = Parcel.objects.select_for_update().filter(
+        Q(qr_token=token_str) | Q(parcel_number=token_str) | Q(order__order_number=token_str)
+    ).first()
+    if not parcel:
         raise ValidationError("Invalid QR code.")
 
     if parcel.shop != delivery_boy_profile.shop:

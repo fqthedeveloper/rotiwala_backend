@@ -92,9 +92,22 @@ class AddToCartView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        variant_id = request.data.get("variant") or request.data.get("variant_id")
+        variant = None
+        if variant_id:
+            from menu.models import MenuItemVariant
+            try:
+                variant = MenuItemVariant.objects.get(id=variant_id, menu_item=menu_item, is_active=True)
+            except MenuItemVariant.DoesNotExist:
+                return Response(
+                    {"error": "Selected variant is unavailable or invalid."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         cart_item, created = CartItem.objects.get_or_create(
             cart=cart,
-            menu_item=menu_item
+            menu_item=menu_item,
+            variant=variant
         )
 
         if created:
@@ -116,6 +129,7 @@ class AddToCartView(APIView):
                 "message": "Item added to cart",
                 "cart_item_id": cart_item.id,
                 "menu_item": menu_item.name,
+                "variant": variant.name if variant else None,
                 "quantity": cart_item.quantity
             }
         )
