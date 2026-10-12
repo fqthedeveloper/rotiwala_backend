@@ -1592,6 +1592,25 @@ class CreateWalkInCartView(APIView):
             ""
         )
 
+        order_taking_method = request.data.get(
+            "order_taking_method",
+            "walkin"
+        )
+        if order_taking_method not in ["walkin", "call"]:
+            order_taking_method = "walkin"
+
+        prep_timing = request.data.get(
+            "prep_timing",
+            "now"
+        )
+        if prep_timing not in ["now", "later"]:
+            prep_timing = "now"
+
+        prep_time = request.data.get(
+            "prep_time",
+            "NOW"
+        )
+
         # ------------------------------------
         # Validate Payment Method
         # ------------------------------------
@@ -1599,6 +1618,8 @@ class CreateWalkInCartView(APIView):
         if payment_method not in [
             "cash",
             "upi",
+            "credit",
+            "parts",
         ]:
 
             payment_method = "cash"
@@ -1648,6 +1669,12 @@ class CreateWalkInCartView(APIView):
                     customer_name=customer_name,
 
                     customer_phone=customer_phone,
+
+                    order_taking_method=order_taking_method,
+
+                    prep_timing=prep_timing,
+
+                    prep_time=prep_time,
 
                     payment_method=payment_method,
 
@@ -2008,6 +2035,25 @@ class UpdateWalkInCartView(APIView):
                 cart.payment_status = p_status
 
         # --------------------------------------
+        # Update Order Taking Method (if provided)
+        # --------------------------------------
+        if "order_taking_method" in request.data:
+            taking_method = request.data.get("order_taking_method")
+            if taking_method in ["walkin", "call"]:
+                cart.order_taking_method = taking_method
+
+        # --------------------------------------
+        # Update Prep Timing & Prep Time (if provided)
+        # --------------------------------------
+        if "prep_timing" in request.data:
+            p_timing = request.data.get("prep_timing")
+            if p_timing in ["now", "later"]:
+                cart.prep_timing = p_timing
+
+        if "prep_time" in request.data:
+            cart.prep_time = request.data.get("prep_time") or "NOW"
+
+        # --------------------------------------
         # Update Notes (if provided)
         # --------------------------------------
         if "notes" in request.data:
@@ -2109,6 +2155,30 @@ class PlaceWalkInCartView(APIView):
             # Ignore coupon if discount is manually selected
             coupon_code = None
 
+        # ---------------------------------------------
+        # Order taking method, prep time, & payment
+        # ---------------------------------------------
+        order_taking_method = request.data.get("order_taking_method") or getattr(cart, "order_taking_method", None) or "walkin"
+        if order_taking_method not in ["walkin", "call"]:
+            order_taking_method = "walkin"
+
+        prep_timing = request.data.get("prep_timing") or getattr(cart, "prep_timing", None) or "now"
+        prep_time = request.data.get("prep_time") or getattr(cart, "prep_time", None) or "NOW"
+        payment_method = request.data.get("payment_method") or getattr(cart, "payment_method", None) or "cash"
+        if payment_method not in ["cash", "upi", "credit", "parts"]:
+            payment_method = "cash"
+
+        pickup_type = "instant" if prep_timing == "now" else "scheduled"
+        est_min = 15
+        if "min" in prep_time.lower():
+            import re
+            m = re.findall(r'\d+', prep_time)
+            if m:
+                try:
+                    est_min = int(m[0])
+                except Exception:
+                    est_min = 15
+
         # ========================================================
         # 3. Create the order skeleton
         # ========================================================
@@ -2116,10 +2186,14 @@ class PlaceWalkInCartView(APIView):
             order_number=generate_walkin_order_number(cart.shop),
             customer=customer,   # now customer can be new or existing
             shop=cart.shop,
-            payment_method=cart.payment_method,
+            payment_method=payment_method,
             payment_status=payment_status,
             paid_at=paid_at,
             order_type="walkin",
+            order_taking_method=order_taking_method,
+            pickup_type=pickup_type,
+            prep_time=prep_time,
+            estimated_minutes=est_min,
             status="accepted",
             accepted_at=timezone.now(),
             customer_name=customer.first_name if customer else cart.customer_name,
@@ -2463,7 +2537,7 @@ class UpdatePlacedOrderView(APIView):
 
         if payment_method:
             clean_pm = str(payment_method).lower().strip()
-            if clean_pm in ["cash", "upi"]:
+            if clean_pm in ["cash", "upi", "credit", "parts"]:
                 order.payment_method = clean_pm
 
         if payment_status:
@@ -2474,6 +2548,14 @@ class UpdatePlacedOrderView(APIView):
                     order.paid_at = timezone.now()
                 elif clean_ps == "unpaid":
                     order.paid_at = None
+
+        if "order_taking_method" in request.data:
+            clean_otm = str(request.data.get("order_taking_method")).lower().strip()
+            if clean_otm in ["walkin", "call"]:
+                order.order_taking_method = clean_otm
+
+        if "prep_time" in request.data:
+            order.prep_time = request.data.get("prep_time") or "NOW"
 
         order.notes = notes
         

@@ -256,7 +256,14 @@ def generate_receipt_pdf(order, bill_type='standard'):
 
     # ---------- Payment & Notes ----------
     pdf.set_font(FONT_FAMILY, '', 10)
-    pdf.cell(0, 6, txt=f"Payment Method: {getattr(order, 'payment_method', 'N/A').upper()}", ln=1)
+    pm = getattr(order, 'payment_method', 'cash').lower()
+    pm_display = {
+        'cash': 'CASH',
+        'upi': 'UPI',
+        'credit': 'CREDIT (UDHAAR)',
+        'parts': 'SPLIT / PART PAYMENT',
+    }.get(pm, pm.upper())
+    pdf.cell(0, 6, txt=f"Payment Method: {pm_display}", ln=1)
     pdf.cell(0, 6, txt=f"Payment Status: {getattr(order, 'payment_status', 'N/A').upper()}", ln=1)
     if is_delivery:
         pdf.cell(0, 6, txt="Order Mode: ONLINE DELIVERY", ln=1)
@@ -270,10 +277,15 @@ def generate_receipt_pdf(order, bill_type='standard'):
         except Exception:
             pass
     else:
-        order_type_display = 'WALK-IN' if getattr(order, 'order_type', None) == 'walkin' else 'ONLINE'
-        pdf.cell(0, 6, txt=f"Order Mode: {order_type_display} PICKUP", ln=1)
-        pickup_val = (getattr(order, 'pickup_type', '') or 'instant').upper()
-        pdf.cell(0, 6, txt=f"Pickup: {pickup_val}", ln=1)
+        if getattr(order, 'order_type', None) == 'walkin':
+            otm = getattr(order, 'order_taking_method', 'walkin')
+            taking_display = "CALL ORDER" if otm == "call" else "COUNTER"
+            order_type_display = f"WALK-IN ({taking_display})"
+        else:
+            order_type_display = "ONLINE PICKUP"
+        pdf.cell(0, 6, txt=f"Order Mode: {order_type_display}", ln=1)
+        prep_display = getattr(order, 'prep_time', None) or (getattr(order, 'pickup_type', '') or 'instant').upper()
+        pdf.cell(0, 6, txt=f"Prep Timing: {prep_display}", ln=1)
 
     if getattr(order, 'notes', None):
         pdf.ln(2)
@@ -398,10 +410,14 @@ def generate_receipt_text(order, bill_type='standard'):
         except Exception:
             pass
     else:
-        order_type_display = 'WALK-IN' if getattr(order, 'order_type', None) == 'walkin' else 'ONLINE'
-        lines.append(f'Mode     : {order_type_display} PICKUP')
-        pickup_val = (getattr(order, 'pickup_type', '') or 'instant').upper()
-        lines.append(f'Pickup   : {pickup_val}')
+        if getattr(order, 'order_type', None) == 'walkin':
+            otm = getattr(order, 'order_taking_method', 'walkin')
+            taking_display = "CALL ORDER" if otm == "call" else "COUNTER"
+            lines.append(f'Mode     : WALK-IN ({taking_display})')
+        else:
+            lines.append('Mode     : ONLINE PICKUP')
+        prep_display = getattr(order, 'prep_time', None) or (getattr(order, 'pickup_type', '') or 'instant').upper()
+        lines.append(f'Prep     : {prep_display}')
 
     lines.append('')
     lines.append(dashed)
@@ -428,7 +444,14 @@ def generate_receipt_text(order, bill_type='standard'):
     lines.append('')
     lines.append(f'Grand Total           ₹{float(order.total_amount):.2f}')
     lines.append('')
-    lines.append(f'Payment    : {order.payment_method.upper()}')
+    pm = getattr(order, 'payment_method', 'cash').lower()
+    pm_display = {
+        'cash': 'CASH',
+        'upi': 'UPI',
+        'credit': 'CREDIT (UDHAAR)',
+        'parts': 'SPLIT / PART PAYMENT',
+    }.get(pm, pm.upper())
+    lines.append(f'Payment    : {pm_display}')
     lines.append(f'Status     : {order.payment_status.upper()}')
 
     if is_delivery:
@@ -493,6 +516,8 @@ def generate_receipt_data(order, bill_type='standard'):
         'payment_method': order.payment_method,
         'payment_status': order.payment_status,
         'order_type': order.order_type,
+        'order_taking_method': getattr(order, 'order_taking_method', 'walkin'),
+        'prep_time': getattr(order, 'prep_time', 'NOW'),
         'delivery_option': getattr(order, 'delivery_option', 'pickup'),
         'is_delivery': is_delivery,
         'delivery_address': getattr(order, 'delivery_address', '') if is_delivery else '',

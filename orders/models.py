@@ -110,6 +110,23 @@ class Order(models.Model):
         default="online"
     )
 
+    order_taking_method = models.CharField(
+        max_length=20,
+        choices=(
+            ("walkin", "Walk-In Counter"),
+            ("call", "Phone Call"),
+        ),
+        default="walkin",
+        help_text="Whether counter order was taken at counter or via phone call"
+    )
+
+    prep_time = models.CharField(
+        max_length=50,
+        blank=True,
+        default="NOW",
+        help_text="Prep timing selected at POS (e.g. NOW, 15 Min, or scheduled time)"
+    )
+
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
@@ -436,6 +453,30 @@ class WalkInCart(models.Model):
         max_length=20,
         blank=True,
         null=True
+    )
+
+    order_taking_method = models.CharField(
+        max_length=20,
+        choices=(
+            ("walkin", "Walk-In Counter"),
+            ("call", "Phone Call"),
+        ),
+        default="walkin"
+    )
+
+    prep_timing = models.CharField(
+        max_length=20,
+        choices=(
+            ("now", "Now"),
+            ("later", "Later"),
+        ),
+        default="now"
+    )
+
+    prep_time = models.CharField(
+        max_length=50,
+        blank=True,
+        default="NOW"
     )
 
     payment_method = models.CharField(
